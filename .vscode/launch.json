@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Service Desk: chat",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Tests: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q", "${file}"],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
