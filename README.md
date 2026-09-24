@@ -89,6 +89,7 @@ Then, with the venv active:
 |---|---|
 | `python -m src` | Starts the Service Desk chat |
 | `python -m pytest -q` | Runs the tests (no LLM calls, no cost) |
+| `python -m evals.run` | Runs the agent eval (calls the LLM, ~US$ 0.01) |
 | `pip install -r requirements.txt` | Installs/updates dependencies |
 | `deactivate` | Leaves the virtual environment |
 
@@ -116,6 +117,17 @@ The tools are deterministic, so their tests don't call the LLM:
 python -m pytest -q
 ```
 
+## 📊 Evals
+
+The agent's behavior is measured with a mini-eval: 18 cases (knowledge base, tickets, access requests, two problems in one message, prompt injection, out of scope), each run 3 times and graded by code, based on which tools were called and what was replied.
+
+```bash
+python -m evals.run                   # all cases, 3 runs each
+python -m evals.run --runs 1 --case 10 11
+```
+
+Results are saved to `evals/results/` so architectures can be compared on pass rate, cost and latency.
+
 ## 📁 Project Structure
 
 ```
@@ -126,5 +138,6 @@ src/
 ├── data.py       # Fake company systems: users, knowledge base, tickets
 └── __main__.py   # Terminal chat
 tests/            # Tool tests (no LLM calls)
+evals/            # Agent eval: cases, runner and saved results
 notes/            # Architecture notes and decisions (PT-BR)
 ```

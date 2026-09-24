@@ -27,6 +27,15 @@ How to work:
 
 
 @dataclass
+class ToolCall:
+    """One tool execution — recorded so the eval can check WHAT the agent did, not just what it said."""
+    name: str
+    arguments: dict
+    result: str
+    is_error: bool
+
+
+@dataclass
 class Usage:
     """Accumulates tokens and model calls — the basis for comparing architectures in lesson 1.3."""
     calls: int = 0
@@ -53,6 +62,7 @@ class ServiceDeskAgent:
         # In the OpenAI API the system prompt is the first message of the list.
         self.messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.usage = Usage()
+        self.tool_calls: list[ToolCall] = []  # the agent's "trace": every tool it ran, in order
 
     def reply(self, user_text: str) -> str:
         self.messages.append({"role": "user", "content": user_text})
@@ -81,6 +91,7 @@ class ServiceDeskAgent:
                         continue
                     arguments = json.loads(call.function.arguments)  # arrives as a JSON string
                     result, is_error = run_tool(call.function.name, arguments)
+                    self.tool_calls.append(ToolCall(call.function.name, arguments, result, is_error))
                     self._log(f"  🔧 {call.function.name}({arguments})")
                     self._log(f"     ↳ {'❌ ' if is_error else ''}{result[:200]}")
                     # One "tool" message per call, linked to the request by its id.

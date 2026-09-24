@@ -10,6 +10,7 @@
   - [Categoria não é Agente](#categoria-não-é-agente)
   - [Segurança](#segurança)
   - [Evals](#evals)
+  - [O loop do agente na prática](#o-loop-do-agente-na-prática)
   - [Decisões do projeto](#decisões-do-projeto)
 
 ---
@@ -53,6 +54,21 @@
 - Eval = dataset → execução → nota em %.
 - Formas de dar a nota: código > LLM-as-judge > humano.
 - É o eval que transforma "multi-agente é melhor?" numa decisão baseada em números.
+- Rodar cada caso várias vezes: o LLM varia, e 2/3 é um sinal diferente de 3/3.
+- **Eval também tem bug:** leia as falhas antes de concluir (o baseline deu 83% por erro do checker; o real era 98%).
+- Checagem por palavra-chave é frágil ("ainda não foi concedido" contém "foi concedido").
+- Baseline do projeto: 98%, com 2,7 chamadas e US$ 0,00023 por caso. Pelos números, não valeria dividir em multi-agente.
+
+### O loop do agente na prática
+- Agente = `while`: chama o LLM → se pediu tool, o **código** executa e devolve → repete; senão, responde.
+- O estado é só a lista de mensagens, reenviada inteira a cada chamada (a API não guarda nada).
+- Cada volta do loop é uma chamada paga: uma mensagem do usuário pode custar 2, 3 ou mais chamadas.
+- A descrição da tool é um prompt: é por ela que o LLM decide quando usar.
+- Erro de tool volta para o LLM como resultado; o agente se corrige em vez de quebrar.
+- `max_steps` é a trava contra loop infinito.
+- Tools são testadas com pytest; o comportamento do LLM precisa de eval.
+- O conceito é igual em qualquer provedor; muda só o formato (tool, mensagens, stop reason).
+- ⚠️ Identidade vinda do chat é entrada não confiável: dá para se passar por outra pessoa (corrigir com autenticação).
 
 ### Decisões do projeto
 - **D1:** agentes divididos por capacidade e permissão, não por categoria.

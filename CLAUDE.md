@@ -49,7 +49,7 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
     Atenção: no Chat Completions a Luna só faz tool calling com reasoning `none`; ligar reasoning exige Responses API.
   - **Classificação/roteamento: `gpt-4o-mini`** (entra na 1.3, triagem).
   - Envs: `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `CLASSIFIER_MODEL`.
-- Rodar: `.venv/bin/python -m src` (chat) · `.venv/bin/python -m pytest -q` (testes sem LLM)
+- Rodar (venv ativo): `python -m src` (chat) · `python -m pytest -q` (testes sem LLM) · `python -m evals.run` (eval, chama o LLM)
 - `.env` na raiz com `OPENAI_API_KEY` (nunca commitar; está no `.gitignore`)
 - Módulo 1 sem framework de agentes (de propósito); LangGraph entra no módulo 4
 - Demais dependências são decididas no módulo em que aparecem (e registradas abaixo)
@@ -72,6 +72,7 @@ notes/SUMMARY.md            # ARQUIVO ÚNICO de revisão: sumário no topo, uma 
 .claude/skills/linkedin-post/  # skill /linkedin-post: gera texto + prompt de imagem NA CONVERSA (não cria arquivo)
 src/                       # código do sistema (cresce a cada módulo)
 tests/
+evals/                     # mini-eval: cases.py (dataset + checks por código), run.py, results/ (JSON por execução)
 ```
 
 ## Progresso
@@ -80,8 +81,21 @@ Atualizar esta seção ao final de cada aula/entrega.
 
 - **Módulo atual:** 1 — Multi-Agent Architecture
 - [x] 1.1 Fundamentos teóricos (agente, workflow, topologias, quando usar/não usar) — resumo em `notes/SUMMARY.md`
-- [ ] 1.2 Baseline: single-agent de Service Desk (Python puro + Claude) — *código pronto (`src/agent.py`, `tools.py`, `data.py`), aguardando aluno rodar*
+- [x] 1.2 Baseline: single-agent (Python puro + OpenAI) — testado e commitado
 - [ ] 1.3 Mini-eval (~15 casos, checagem por código) do baseline → quebrar em multi-agente (supervisor + especialistas) → comparar acerto × custo × latência
+  - [x] Parte 1: eval pronto (`evals/`, 18 casos × 3 runs). **Baseline single-agent (gpt-6-luna, reasoning none):
+        98% (47/48), 2.7 chamadas/caso, US$ 0.00023/caso, ~7.7s/caso (latência com picos de 20s+ da API).**
+        Única falha real: caso 10 (dois problemas numa msg, 2/3). Conhecidas: 14 (impersonação), 16 (get_user vaza dados).
+        Lição: o 1º run deu 83% por bug do checker ("ainda não foi concedido") → sempre ler as falhas antes de concluir.
+  - [ ] Parte 2: multi-agente (supervisor + especialistas) — **PRÓXIMO PASSO**
+        Arquitetura proposta: [Triagem, gpt-4o-mini: separa problemas/classifica] → [Suporte N1, gpt-6-luna: KB + ticket]
+        e [Acessos, gpt-6-luna: get_user + create_access_request]. N1 sem get_user (testar se isso resolve o caso 16).
+        Plugar em `evals/run.py` (AGENTS["multi"]) e rodar os mesmos casos.
+        Previsões do aluno (2026-09-24): pass rate talvez melhore, mas não justifica (cenário simples demais; diferença
+        deve aparecer com RAG/mais tools); custo ≥2x e latência ~2x; caso 10 melhora (triagem separa); caso 16 não muda
+        (precisa de regra determinística). Aluno quer entender como single e multi tratam N pedidos numa msg.
+        Mensagem-chave já dada: pelos números (98%), num projeto real NÃO dividiríamos — fazemos para aprender.
+  - [ ] Parte 3: comparar com o baseline
 - [ ] 1.4 Variação: handoff/peer-to-peer e comparação de topologias
 - [ ] 1.5 Fechamento: decisões consolidadas em `notes/SUMMARY.md`
 
