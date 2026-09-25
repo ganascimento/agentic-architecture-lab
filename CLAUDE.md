@@ -82,21 +82,41 @@ Atualizar esta seção ao final de cada aula/entrega.
 - **Módulo atual:** 1 — Multi-Agent Architecture
 - [x] 1.1 Fundamentos teóricos (agente, workflow, topologias, quando usar/não usar) — resumo em `notes/SUMMARY.md`
 - [x] 1.2 Baseline: single-agent (Python puro + OpenAI) — testado e commitado
-- [ ] 1.3 Mini-eval (~15 casos, checagem por código) do baseline → quebrar em multi-agente (supervisor + especialistas) → comparar acerto × custo × latência
+- [x] 1.3 Mini-eval (~15 casos, checagem por código) do baseline → quebrar em multi-agente (supervisor + especialistas) → comparar acerto × custo × latência
   - [x] Parte 1: eval pronto (`evals/`, 18 casos × 3 runs). **Baseline single-agent (gpt-6-luna, reasoning none):
         98% (47/48), 2.7 chamadas/caso, US$ 0.00023/caso, ~7.7s/caso (latência com picos de 20s+ da API).**
         Única falha real: caso 10 (dois problemas numa msg, 2/3). Conhecidas: 14 (impersonação), 16 (get_user vaza dados).
         Lição: o 1º run deu 83% por bug do checker ("ainda não foi concedido") → sempre ler as falhas antes de concluir.
-  - [ ] Parte 2: multi-agente (supervisor + especialistas) — **PRÓXIMO PASSO**
-        Arquitetura proposta: [Triagem, gpt-4o-mini: separa problemas/classifica] → [Suporte N1, gpt-6-luna: KB + ticket]
-        e [Acessos, gpt-6-luna: get_user + create_access_request]. N1 sem get_user (testar se isso resolve o caso 16).
-        Plugar em `evals/run.py` (AGENTS["multi"]) e rodar os mesmos casos.
-        Previsões do aluno (2026-09-24): pass rate talvez melhore, mas não justifica (cenário simples demais; diferença
-        deve aparecer com RAG/mais tools); custo ≥2x e latência ~2x; caso 10 melhora (triagem separa); caso 16 não muda
-        (precisa de regra determinística). Aluno quer entender como single e multi tratam N pedidos numa msg.
-        Mensagem-chave já dada: pelos números (98%), num projeto real NÃO dividiríamos — fazemos para aprender.
-  - [ ] Parte 3: comparar com o baseline
-- [ ] 1.4 Variação: handoff/peer-to-peer e comparação de topologias
+  - [x] Parte 2: multi-agente — `src/triage.py` (gpt-4o-mini, structured outputs) → `src/multi_agent.py` (for-loop,
+        sequencial, concatena) → `src/specialists.py` (mesmo loop do baseline, prompt+tools próprios; trava `allowed`
+        no `run_tool`). Suporte N1: KB + ticket. Acessos: só create_access_request. **Nenhum especialista tem get_user.**
+        Previsões do aluno (2026-09-24): pass rate talvez melhore mas não justifica; custo ≥2x; latência ~2x;
+        caso 10 melhora; caso 16 não muda (precisa de regra determinística).
+        Conclusão do aluno: é **routing + fan-out (workflow)**, não supervisor — plano fixo antes de executar, ninguém lê
+        o resultado de um especialista para decidir o próximo passo, sem síntese. Routing quando dá pra decidir tudo
+        antes; supervisor quando o próximo passo depende do resultado. Isolar permissões também isola informação.
+        "Telefone sem fio": a triagem reescreveu o caso 10 em inglês e perdeu a justificativa → correção escolhida pelo
+        aluno: especialista recebe **msg original ("context only") + sub-pedido + e-mail**.
+        Injection (caso 12): aluno propôs a triagem reescrever para sanitizar → descartado por ora (injection é semântica,
+        reescrita fiel preserva o ataque; a triagem é a 1ª vítima). O que segura é a arquitetura (D2 + `allowed`).
+        Alternativa melhor (extração estruturada em campos/enum, Dual LLM/CaMeL) → **pendência para o módulo 6**.
+        Caso 16: aluno concluiu que resolve com trava no código, não na triagem (ela não tem dados p/ julgar e quebraria
+        fluxos legítimos). Ressalva: a trava só vale com identidade autenticada (Achado 1.2). Correção feita já:
+        tirar get_user do Acessos (não precisava) → 16 passou 3/3 no multi.
+  - [x] Parte 3: comparação na MESMA janela (2026-09-25, `evals/results/*-20260925-0834*.json`):
+        single × multi → pass 94% (45/48) × 98% (47/48) · chamadas 2.8 × 3.1 · custo US$ 0.00023 × 0.00023 ·
+        latência 3.1s × 3.7s (+19%).
+        - Custo empatou (previsão ≥2x errou): só casos com 2 pedidos dobram; nos de 1 pedido a triagem soma pouco e o
+          especialista tem prompt/tools menores.
+        - O single caiu de 98% (ontem) para 94% hoje com o MESMO código → com 18×3 runs, ±4pp é ruído; 98×94 não é
+          diferença significativa. A latência de ontem (7.7s) era pico da API → só comparar execuções na mesma janela.
+        - Multi, caso 5 (2/3 nos dois evals): o N1 **disse "Abri um chamado" sem chamar open_ticket** (ação alucinada;
+          pior que só prometer). No single não ocorreu (0/6). Correção possível: checagem em código da resposta × trace.
+        - Single, caso 9: chamou create_access_request antes de ter o e-mail (2/3); no multi, 3/3.
+        - Resposta fixa de out_of_scope é em inglês (apareceu no 16 para usuário PT).
+        Veredito: acerto igual dentro do ruído, custo igual, +19% latência, muito mais complexidade → num projeto real
+        NÃO dividiríamos. Fechada pelo aluno em 2026-09-25.
+- [ ] 1.4 Variação: handoff/peer-to-peer e comparação de topologias — **PRÓXIMO PASSO**
 - [ ] 1.5 Fechamento: decisões consolidadas em `notes/SUMMARY.md`
 
 ## Decisões de arquitetura registradas

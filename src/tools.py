@@ -125,12 +125,22 @@ IMPLEMENTATIONS = {
 }
 
 
-def run_tool(name: str, arguments: dict) -> tuple[str, bool]:
+def tools_for(names: set[str]) -> list[ChatCompletionToolParam]:
+    """Subset of TOOLS — what one specialist is allowed to SEE."""
+    return [t for t in TOOLS if t["function"]["name"] in names]
+
+
+def run_tool(name: str, arguments: dict, allowed: set[str] | None = None) -> tuple[str, bool]:
     """Runs the tool the LLM asked for. Returns (result_as_text, is_error).
 
     Errors don't crash the agent: they go back to the LLM as a normal result starting with "Error:",
     and it decides what to do next (ask for the right email, try another search...).
+
+    `allowed` is the real least-privilege lock: hiding a tool from the LLM is not enough, because it can
+    still ASK for any name (hallucination, prompt injection). The code refuses what the agent doesn't own.
     """
+    if allowed is not None and name not in allowed:
+        return f"Error: tool '{name}' is not available to this agent.", True
     func = IMPLEMENTATIONS.get(name)
     if func is None:
         return f"Unknown tool: {name}", True

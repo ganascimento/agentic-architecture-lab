@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 
 from openai import OpenAI, omit
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
 from src.config import AGENT, PRICES, ModelConfig
 from src.tools import TOOLS, run_tool
@@ -53,14 +53,25 @@ class Usage:
 
 
 class ServiceDeskAgent:
-    def __init__(self, model: ModelConfig = AGENT, max_steps: int = 10, verbose: bool = True):
+    def __init__(
+        self,
+        model: ModelConfig = AGENT,
+        max_steps: int = 10,
+        verbose: bool = True,
+        system_prompt: str = SYSTEM_PROMPT,
+        tools: list[ChatCompletionToolParam] = TOOLS,
+    ):
+        # An "agent" here is just configuration on top of a generic loop: model + prompt + tools.
+        # The specialists (src/specialists.py) are this same class with another prompt and fewer tools.
         self.client = OpenAI()
         self.model = model
+        self.tools = tools
+        self.allowed_tools = {t["function"]["name"] for t in tools}
         self.max_steps = max_steps  # Design question #4: who decides it's done? (safety stop)
         self.verbose = verbose
         # The agent's "state" is just this: the conversation history.
         # In the OpenAI API the system prompt is the first message of the list.
-        self.messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": system_prompt}]
         self.usage = Usage()
         self.tool_calls: list[ToolCall] = []  # the agent's "trace": every tool it ran, in order
 
@@ -73,7 +84,7 @@ class ServiceDeskAgent:
             response = self.client.chat.completions.create(
                 model=self.model.name,
                 messages=self.messages,
-                tools=TOOLS,
+                tools=self.tools,
                 reasoning_effort=self.model.reasoning_effort or omit,  # type: ignore[arg-type]
             )
             if response.usage:
@@ -90,7 +101,7 @@ class ServiceDeskAgent:
                     if call.type != "function":
                         continue
                     arguments = json.loads(call.function.arguments)  # arrives as a JSON string
-                    result, is_error = run_tool(call.function.name, arguments)
+                    result, is_error = run_tool(call.function.name, arguments, self.allowed_tools)
                     self.tool_calls.append(ToolCall(call.function.name, arguments, result, is_error))
                     self._log(f"  🔧 {call.function.name}({arguments})")
                     self._log(f"     ↳ {'❌ ' if is_error else ''}{result[:200]}")
@@ -107,6 +118,10 @@ class ServiceDeskAgent:
         # ==============================================================
 
         return "[agent stopped: step limit reached]"
+
+    def cost(self) -> float:
+        """US$ spent so far. The multi-agent desk has the same method (it sums several models)."""
+        return self.usage.cost(self.model.name)
 
     def _log(self, msg: str) -> None:
         if self.verbose:

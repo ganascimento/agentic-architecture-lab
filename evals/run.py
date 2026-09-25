@@ -11,20 +11,35 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
 from evals.cases import CASES, Case, RunResult
 from src import data
-from src.agent import ServiceDeskAgent
+from src.agent import ServiceDeskAgent, ToolCall, Usage
+from src.multi_agent import MultiAgentServiceDesk
 
-# Architectures under test. In lesson 1.3 we add "multi" here and run the SAME cases.
-AGENTS: dict[str, Callable[[], ServiceDeskAgent]] = {
+
+class Agent(Protocol):
+    """What the eval needs from an architecture. Single and multi are different classes with this same shape."""
+
+    tool_calls: list[ToolCall]
+
+    @property
+    def usage(self) -> Usage: ...
+    def reply(self, user_text: str) -> str: ...
+    def cost(self) -> float: ...
+
+
+# Architectures under test: the SAME cases run against each one.
+AGENTS: dict[str, Callable[[], Agent]] = {
     "single": lambda: ServiceDeskAgent(verbose=False),
+    "multi": lambda: MultiAgentServiceDesk(verbose=False),
 }
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
-def run_case(case: Case, make_agent: Callable[[], ServiceDeskAgent]) -> RunResult:
+def run_case(case: Case, make_agent: Callable[[], Agent]) -> RunResult:
     data.reset()  # every run starts from the same data
     agent = make_agent()
     start = time.perf_counter()
@@ -34,7 +49,7 @@ def run_case(case: Case, make_agent: Callable[[], ServiceDeskAgent]) -> RunResul
         replies=replies,
         tool_calls=agent.tool_calls,
         calls=agent.usage.calls,
-        cost=agent.usage.cost(agent.model.name),
+        cost=agent.cost(),
         latency=time.perf_counter() - start,
     )
 

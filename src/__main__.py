@@ -27,10 +27,10 @@ def main() -> None:
             print("Access requests:", data.ACCESS_REQUESTS or "none", "\n")
             continue
 
-        calls_before, cost_before = agent.usage.calls, agent.usage.cost(agent.model.name)
+        calls_before, cost_before = agent.usage.calls, agent.cost()
         answer = agent.reply(text)
         calls = agent.usage.calls - calls_before
-        cost = agent.usage.cost(agent.model.name) - cost_before
+        cost = agent.cost() - cost_before
         print(f"\nagent> {answer}")
         print(f"       [{calls} model calls | US$ {cost:.4f} this turn]\n")
 
