@@ -271,7 +271,7 @@ Atualizar esta seção ao final de cada aula/entrega.
   - (antigo) aluno fechar a 1.4 (concorda com o veredito?) → commit de tudo desde a 1.3 (auth, tools, reorg,
     handoff, proveniência) → 1.5 (fechamento do módulo em `notes/SUMMARY.md`). Pendências registradas: descrição do
     `request_password_reset` (caso 28); checagem de sentido da justificativa → módulo 6.
-- [ ] 1.5 Fechamento: decisões consolidadas em `notes/SUMMARY.md`
+- [x] 1.5 Fechamento: decisões consolidadas em `notes/SUMMARY.md` (D4–D8, seções novas) — aguardando o aluno fechar o módulo 1
 
 ## Decisões de arquitetura registradas
 
@@ -279,6 +279,11 @@ Registradas também em `notes/SUMMARY.md`.
 - D1 agentes divididos por capacidade/permissão, não por categoria
 - D2 LLM nunca executa concessão de acesso; só cria solicitação → aprovação humana → código executa
 - D3 handoff para quem conversa; agent-as-tool para consulta pontual
+- D4 identidade da sessão injetada pelo código; tools não recebem identidade do LLM
+- D5 regras críticas no código (permissão, dono, proveniência, limites), nunca só no prompt
+- D6 contexto entre agentes = original/conversa assinada, nunca só resumo
+- D7 topologia: single padrão; routing p/ multi-pedido/ambíguo; handoff hub p/ muitos agentes; malha só com poucos
+- D8 anti-ping-pong no código (sem volta no turno, 1 transfer por resposta, limite)
 - **Achado 1.2 (RESOLVIDO na 1.4):** identidade vinha do chat — o usuário digitou o e-mail de outra pessoa e o
   agente abriu solicitação em nome dela. Correção: login + `Session` injetada pelo código em toda tool; nenhuma tool
   recebe e-mail do LLM (`get_user(email)` virou `get_my_profile()`). Lição: identidade é contexto do código, não argumento do LLM.
