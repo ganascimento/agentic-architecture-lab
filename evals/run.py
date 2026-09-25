@@ -1,47 +1,30 @@
 """Runs the mini-eval against an agent architecture and saves the results for comparison.
 
 Usage (venv active):
-    python -m evals.run                  # all cases, 3 runs each
+    python -m evals.run                         # single agent, all cases, 3 runs each
+    python -m evals.run --arch handoff          # single | routing | handoff
     python -m evals.run --runs 1 --case 10 11
 """
 
 import argparse
 import json
 import time
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+
+import openai
 
 from evals.cases import CASES, Case, RunResult
 from src import data
-from src.agent import ServiceDeskAgent, ToolCall, Usage
-from src.multi_agent import MultiAgentServiceDesk
-
-
-class Agent(Protocol):
-    """What the eval needs from an architecture. Single and multi are different classes with this same shape."""
-
-    tool_calls: list[ToolCall]
-
-    @property
-    def usage(self) -> Usage: ...
-    def reply(self, user_text: str) -> str: ...
-    def cost(self) -> float: ...
-
-
-# Architectures under test: the SAME cases run against each one.
-AGENTS: dict[str, Callable[[], Agent]] = {
-    "single": lambda: ServiceDeskAgent(verbose=False),
-    "multi": lambda: MultiAgentServiceDesk(verbose=False),
-}
+from src.architectures import ARCHITECTURES
+from src.auth import session_for
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
-def run_case(case: Case, make_agent: Callable[[], Agent]) -> RunResult:
+def run_case(case: Case, arch: str) -> RunResult:
     data.reset()  # every run starts from the same data
-    agent = make_agent()
+    agent = ARCHITECTURES[arch](session_for(case.user), False)  # the case's user is already logged in
     start = time.perf_counter()
     replies = [agent.reply(turn) for turn in case.turns]
     return RunResult(
@@ -54,20 +37,34 @@ def run_case(case: Case, make_agent: Callable[[], Agent]) -> RunResult:
     )
 
 
+def run_case_with_retry(case: Case, arch: str, attempts: int = 3) -> RunResult:
+    """A network blip says nothing about the agent: retry the whole run (from clean data) instead of crashing
+    the eval. Any other exception still crashes on purpose — that's a bug, not infrastructure."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return run_case(case, arch)
+        except (openai.APIConnectionError, openai.APITimeoutError):
+            if attempt == attempts:
+                raise
+            print(f"  (case {case.id}: connection error, retrying {attempt}/{attempts - 1})")
+            time.sleep(5 * attempt)
+    raise AssertionError("unreachable")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", choices=AGENTS, default="single")
+    parser.add_argument("--arch", choices=ARCHITECTURES, default="single")
     parser.add_argument("--runs", type=int, default=3, help="runs per case (the LLM varies between runs)")
     parser.add_argument("--case", type=int, nargs="*", help="only these case ids")
     args = parser.parse_args()
 
     cases = [c for c in CASES if not args.case or c.id in args.case]
     rows = []
-    print(f"Agent: {args.agent} | {len(cases)} cases x {args.runs} runs\n")
+    print(f"Architecture: {args.arch} | {len(cases)} cases x {args.runs} runs\n")
     print(f"{'#':>3}  {'category':<9} {'pass':<6} {'calls':>5} {'cost US$':>9} {'time s':>7}  notes")
 
     for case in cases:
-        runs = [run_case(case, AGENTS[args.agent]) for _ in range(args.runs)]
+        runs = [run_case_with_retry(case, args.arch) for _ in range(args.runs)]
         failures = [[msg for check in case.checks if (msg := check(r))] for r in runs]
         passed = sum(1 for f in failures if not f)
         row = {
@@ -79,6 +76,8 @@ def main() -> None:
             "failures": [f for f in failures if f],
             "replies": [r.reply for r in runs],
             "tools": [[t.name for t in r.tool_calls] for r in runs],
+            # Arguments too: without them you can't tell WHY a call failed (e.g. an invented justification).
+            "tool_args": [[{t.name: t.arguments} for t in r.tool_calls] for r in runs],
         }
         rows.append(row)
 
@@ -95,7 +94,7 @@ def main() -> None:
     total_runs = sum(r["runs"] for r in scored)
     total_pass = sum(r["passed"] for r in scored)
     summary = {
-        "agent": args.agent,
+        "arch": args.arch,
         "pass_rate": total_pass / total_runs if total_runs else 0.0,
         "avg_calls": sum(r["avg_calls"] for r in rows) / len(rows),
         "avg_cost": sum(r["avg_cost"] for r in rows) / len(rows),
@@ -108,7 +107,7 @@ def main() -> None:
     print("🔶 = known failure (reported, not scored)")
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    out = RESULTS_DIR / f"{args.agent}-{datetime.now():%Y%m%d-%H%M%S}.json"
+    out = RESULTS_DIR / f"{args.arch}-{datetime.now():%Y%m%d-%H%M%S}.json"
     out.write_text(json.dumps({"summary": summary, "cases": rows}, ensure_ascii=False, indent=2))
     print(f"Saved: {out.relative_to(Path.cwd())}")
 
