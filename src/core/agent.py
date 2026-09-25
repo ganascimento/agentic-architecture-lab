@@ -5,6 +5,7 @@ An "agent" is just configuration on top of it (model + prompt + tools) — see s
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from openai import OpenAI, omit
@@ -15,8 +16,13 @@ from src.auth import Session
 from src.config import AGENT, PRICES, ModelConfig
 from src.tools import run_tool
 
-HANDOFF_ACK = ("Transfer scheduled: the next agent takes over after your reply. "
-               "Now reply to the user about YOUR part only; don't mention the part you transferred.")
+# One client for the whole process: each OpenAI() opens its own HTTP connection pool (a new TLS handshake
+# on every agent's first call). Agents are cheap config objects; the connection is not.
+CLIENT = OpenAI()
+
+# A hook for tools the agent's OWNER handles itself (e.g. handoff transfers): given (name, arguments), return
+# None to run the tool normally, or (result_for_the_llm, end_turn) to handle it. See architectures/handoff.py.
+Intercept = Callable[[str, dict], tuple[str, bool] | None]
 
 
 @dataclass
@@ -45,6 +51,15 @@ class Usage:
         return (self.input_tokens * price_in + self.output_tokens * price_out) / 1_000_000
 
 
+def total_usage(parts: list[Usage]) -> Usage:
+    """Sum of several agents' usage — for desks made of many agents."""
+    return Usage(
+        calls=sum(u.calls for u in parts),
+        input_tokens=sum(u.input_tokens for u in parts),
+        output_tokens=sum(u.output_tokens for u in parts),
+    )
+
+
 class Agent:
     def __init__(
         self,
@@ -54,9 +69,9 @@ class Agent:
         model: ModelConfig = AGENT,
         max_steps: int = 10,
         verbose: bool = True,
-        handoff_tools: frozenset[str] = frozenset(),
+        user_texts: list[str] | None = None,
+        intercept: Intercept | None = None,
     ):
-        self.client = OpenAI()
         self.session = session  # who is logged in: passed by the CODE to every tool, never by the LLM
         self.model = model
         self.tools = tools
@@ -69,25 +84,23 @@ class Agent:
         identity = f"\n\nLogged-in user (from the login, not from the chat): {session.name} <{session.email}>."
         self.messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": system_prompt + identity}]
         self.usage = Usage()
-        self.tool_calls: list[ToolCall] = []  # the agent's "trace": every tool it ran, in order
-        # Handoff (lesson 1.4): tools that END this agent's turn and pass the conversation on.
-        # The loop doesn't run them — it records which one was called; the desk does the switch.
-        self.handoff_tools = handoff_tools
-        self.handoff: ToolCall | None = None
+        self.tool_calls: list[ToolCall] = []  # the agent's "trace": every tool call, in order
         # What the user REALLY typed, kept by the code (not by the LLM): the source of truth for the provenance
-        # check. The desks that build the messages themselves (routing, handoff) fill it with the raw text.
-        self.user_texts: list[str] = []
+        # check. A desk that builds the messages itself (routing, handoff) passes its own list and fills it.
+        self._owns_user_texts = user_texts is None
+        self.user_texts = [] if user_texts is None else user_texts
+        self.intercept = intercept
 
-    def reply(self, user_text: str, raw_user_text: str | None = None) -> str:
-        """raw_user_text: when user_text was built by code/LLM (routing wraps it with the triage's restatement)."""
-        self.user_texts.append(raw_user_text if raw_user_text is not None else user_text)
+    def reply(self, user_text: str) -> str:
+        if self._owns_user_texts:
+            self.user_texts.append(user_text)
         self.messages.append({"role": "user", "content": user_text})
         return self.run()
 
     def run(self) -> str:
         """The loop itself, over whatever is in self.messages (the handoff desk fills them before calling)."""
-        self.handoff = None
-        worked = False  # did this agent run any real tool in this call?
+        worked = False    # did a REAL tool run in this call?
+        end_turn = False  # did the owner (intercept) ask to end the turn?
         # ======================= THE AGENT LOOP =======================
         for _ in range(self.max_steps):
             # 1-2. Ask the LLM "given all of this, what's the next step?" and store its answer in the history.
@@ -96,8 +109,9 @@ class Agent:
 
             # 3. Does the LLM want to use tools? We run them and send the results back.
             if choice.finish_reason == "tool_calls" and message.tool_calls:
-                worked |= self._execute_tool_calls(message.tool_calls)
-                if self.handoff and not worked:  # pure transfer, nothing to report: switch now (saves a call)
+                step_worked, step_end = self._execute_tool_calls(message.tool_calls)
+                worked, end_turn = worked or step_worked, end_turn or step_end
+                if end_turn and not worked:  # e.g. a pure transfer: nothing to report, end now (saves a call)
                     return message.content or ""
                 continue  # back to step 1: the LLM decides what to do with the results
 
@@ -110,7 +124,7 @@ class Agent:
     # --- The loop's steps ---------------------------------------------------------------------------
 
     def _ask_llm(self) -> Choice:
-        response = self.client.chat.completions.create(
+        response = CLIENT.chat.completions.create(
             model=self.model.name,
             messages=self.messages,
             tools=self.tools,
@@ -123,31 +137,26 @@ class Agent:
         self.messages.append(choice.message.model_dump(exclude_none=True))  # type: ignore[arg-type]
         return choice
 
-    def _execute_tool_calls(self, calls: list[ChatCompletionMessageToolCallUnion]) -> bool:
-        """Runs every tool call of one LLM answer. Returns True if at least one REAL tool ran (not a handoff)."""
-        offered = {t["function"]["name"] for t in self.tools}  # hidden ≠ blocked: check it was offered
-        worked = False
+    def _execute_tool_calls(self, calls: list[ChatCompletionMessageToolCallUnion]) -> tuple[bool, bool]:
+        """Runs every tool call of one LLM answer. Returns (a real tool ran, the owner asked to end the turn)."""
+        worked = end_turn = False
         for call in calls:
             if call.type != "function":
                 continue
             name = call.function.name
             arguments = json.loads(call.function.arguments)  # arrives as a JSON string
-            if name in self.handoff_tools and name in offered:
-                result = self._schedule_handoff(name, arguments)
+            handled = self.intercept(name, arguments) if self.intercept else None
+            if handled:
+                result, stop = handled
+                end_turn = end_turn or stop
+                self.tool_calls.append(ToolCall(name, arguments, result, False))
+                self._log(f"  🔀 {name}({arguments})")
             else:
                 result = self._run_tool(name, arguments)
                 worked = True
             # One "tool" message per call, linked to the request by its id.
             self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
-        return worked
-
-    def _schedule_handoff(self, name: str, arguments: dict) -> str:
-        # Not executed now: the switch happens AFTER this agent writes its reply. Otherwise its
-        # work never reaches the shared conversation and the next agent redoes it (ping-pong).
-        self.handoff = ToolCall(name, arguments, HANDOFF_ACK, False)
-        self.tool_calls.append(self.handoff)
-        self._log(f"  🔀 {name}({arguments})")
-        return HANDOFF_ACK
+        return worked, end_turn
 
     def _run_tool(self, name: str, arguments: dict) -> str:
         result, is_error = run_tool(name, arguments, self.session, self.allowed_tools, self.user_texts)

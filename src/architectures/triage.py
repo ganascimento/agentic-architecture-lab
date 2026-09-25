@@ -11,14 +11,13 @@ See it in action (calls the LLM):  python -m src --arch routing  (the 🧭 line 
 
 from typing import Literal
 
-from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
-from src.core.agent import Usage
+from src.core.agent import CLIENT, Usage
 from src.config import CLASSIFIER, ModelConfig
 
-Specialist = Literal["support", "access", "out_of_scope"]
+Specialist = Literal["support", "access", "account", "out_of_scope"]
 
 
 class SubRequest(BaseModel):
@@ -38,8 +37,9 @@ SYSTEM_PROMPT = """You are the triage step of an IT Service Desk. You do NOT sol
 
 Split the user's LATEST message into independent requests (one item per problem or request) and route each one:
 - support: technical problems (VPN, network, printer, email, computer, software, SAP), system status, how-to
-  questions, the user's IT tickets (open, status, comments) and password reset.
+  questions and the user's IT tickets (open, status, comments).
 - access: requests for access or permissions to folders or systems, and the status of those requests.
+- account: the user's own account — password reset and profile (department, manager).
 - out_of_scope: anything that is not IT support.
 
 Rules:
@@ -51,7 +51,6 @@ Rules:
 
 class Triage:
     def __init__(self, model: ModelConfig = CLASSIFIER):
-        self.client = OpenAI()
         self.model = model
         self.usage = Usage()
         # Triage keeps its own view of the conversation: user messages + final replies (text only).
@@ -60,7 +59,7 @@ class Triage:
 
     def route(self, user_text: str) -> TriageResult:
         self.history.append({"role": "user", "content": user_text})
-        response = self.client.chat.completions.parse(
+        response = CLIENT.chat.completions.parse(
             model=self.model.name,
             messages=self.history,
             response_format=TriageResult,  # the schema IS the contract between the LLM and our code
@@ -71,6 +70,9 @@ class Triage:
         if result is None:  # refusal: send everything to support rather than drop the message
             result = TriageResult(requests=[SubRequest(specialist="support", request=user_text)])
         return result
+
+    def cost(self) -> float:
+        return self.usage.cost(self.model.name)
 
     def record_reply(self, reply: str) -> None:
         """The orchestrator calls this after answering, so the next turn has context."""

@@ -129,7 +129,7 @@ Atualizar esta seção ao final de cada aula/entrega.
         - Resposta fixa de out_of_scope é em inglês (apareceu no 16 para usuário PT).
         Veredito: acerto igual dentro do ruído, custo igual, +19% latência, muito mais complexidade → num projeto real
         NÃO dividiríamos. Fechada pelo aluno em 2026-09-25.
-- [ ] 1.4 Variação: handoff/peer-to-peer e comparação de topologias — **EM ANDAMENTO**
+- [x] 1.4 Variação: handoff/peer-to-peer e comparação de topologias — fechada pelo aluno em 2026-09-25
   - Feito (não commitado): `src/handoff.py` (HandoffServiceDesk, `AGENTS["handoff"]` no eval). `agent.py` ganhou
     `run()` (loop sem append de user) e `handoff_tools`. `specialists.py` separou papel (SUPPORT_ROLE/ACCESS_ROLE)
     das regras de topologia (`_ROUTED` na 1.3, `_TEAM` no handoff).
@@ -205,7 +205,70 @@ Atualizar esta seção ao final de cada aula/entrega.
     Veredito: single = mais barato/rápido, basta enquanto tools não se confundem; routing = melhor em multi/ambíguo,
     +20% custo; handoff = não ganhou aqui (casos são de 1 turno; ele vale para conversa longa com especialista), mais
     caro e mais exposto a injection. Aluno não respondeu as previsões desta rodada.
-  - **Próximo:** aluno fechar a 1.4 (concorda com o veredito?) → commit de tudo desde a 1.3 (auth, tools, reorg,
+  - **Aluno discordou do veredito:** acha o handoff a melhor arquitetura para escalar a muitos agentes; quer aprender a
+    fazê-lo bem. Contraponto dado: a MALHA atual escala mal (N×(N−1) transfers, N prompts a mudar por agente novo);
+    handoff escala como **hub-and-spoke** (triagem na entrada, especialistas devolvem a ela). Plano de 4 passos:
+    (1) casos multi-turno; (2) hub-and-spoke; (3) contexto do handoff gerado pelo CÓDIGO (fatos do trace, out-of-band);
+    (4) teste de escala com 3º especialista (Conta), contando prompts/tools alterados malha × hub.
+    Tokens: aluno notou ~2M de input no dia (~US$ 0.20) → rodar só subconjuntos (`--case`, `--runs 1`) e o eval
+    completo só nos marcos. Commit `78fdd11` (tudo desde a 1.3).
+  - **Passo 1 feito:** casos 31–34 ("dialog": continuidade, troca de assunto, referência a turno anterior, devolver).
+    100% nas 3. Chamadas/caso 5.2 · 8.4 · 6.8; custo US$ 0.00059 · 0.00079 · 0.00070; latência 10.1 · 15.2 · 13.4s.
+    Handoff < routing em diálogo (routing paga triagem TODO turno); single ainda o mais barato. Custo do handoff =
+    **"imposto da porta errada"**: a cada troca de assunto, o agente atual gasta 1 chamada só para transferir.
+    ⚠️ Suporte abre chamado de impressora antes de orientar a limpeza (KB003) — check não pega (só confere KB003).
+    Previsão para o passo 2: hub cobra 2 saltos por troca de assunto (mais caro), mas desambigua na entrada (caso 10) e
+    escala melhor; variante híbrida (transfere direto se sabe, senão devolve ao hub) fica para depois de medir o puro.
+  - **Passo 2 feito:** `handoff.py` virou desk GENÉRICO configurado por grafo (`MESH`, `HUB`, `AgentSpec`, transfer
+    tools geradas do grafo); `--arch hub` = `hub_desk` (triagem-agente na entrada, SEM tools de domínio, só transfere/
+    pergunta/cumprimenta). Aluno não soube a pergunta de fixação (por que triagem-AGENTE e não classificador?) →
+    ensinado: agente pode PERGUNTAR antes de encaminhar e mantém a conversa; classificador é chute forçado. Alternativa:
+    classificador com rótulo `clarify` (o código pergunta) = workflow × agente de novo. Caso 35 (ambíguo "problema no SAP").
+    Bugs/lições: (a) triagem fez 2 transfers em PARALELO e o 2º sobrescreveu o 1º → `parallel_tool_calls=False` no
+    roteador + guarda no código (só o 1º vale, `HANDOFF_IGNORED`); (b) Suporte tratou "acesso ao SAP" como status →
+    "acesso = permissão" no SUPPORT_ROLE + regra "a [handoff note] define o seu escopo"; (c) triagem perguntava detalhe à
+    toa → só pergunta quando não sabe PARA QUEM; (d) triagem estava no 4o-mini ("o barato") mas ele é mais caro/token →
+    Luna; trocar o modelo mudou o comportamento (Luna pergunta menos). Hub re-entrável no turno (`reentrant`), max 4 handoffs.
+  - Comparação (8 casos × 2 runs; rede instável, retries): routing 16/16 · malha 13/16 · hub 14/16; chamadas 6.9/5.9/7.7;
+    custo US$ 0.00062/0.00065/0.00082. **Com 2 especialistas o hub não se paga** (nó extra + 2 saltos por troca de
+    assunto); malha é a mais barata mas a mais exposta (12: 0/2); hub 12: 1 run virou solicitação, 1 run ping-pong até
+    o limite. A tese do aluno (handoff escala melhor) AINDA NÃO foi testada — benefício do hub seria na escala.
+  - Simplificação pedida pelo aluno ("ficou complexo"): 5 travas anti-ping-pong empilhadas → esconder tool
+    (`base_tools`/refiltrar/`offered`) virou BLOQUEAR no código (`agent.blocked_handoffs` + `HANDOFF_BLOCKED`, o agente
+    responde sozinho); removido `parallel_tool_calls` (o guarda `HANDOFF_IGNORED` é a garantia); `targets`/`reentrant`
+    derivados na hora; `total_usage()` no core (tirou duplicação de routing/handoff). Regras do loop agora testadas sem
+    LLM (fake tool calls). 27 testes + 1 xfail. Smoke 1 run: malha 10 ✅ 29 ✅; hub 10 ❌ 29 ✅ (hub 10 já era 1/2).
+  - **/simplify (4 revisores: reuso, simplificação, eficiência, altitude)** — aplicado, sem mudar comportamento:
+    (1) política de handoff SAIU do loop genérico: `Agent` só conhece o gancho `intercept(name, args) -> (resultado,
+    encerrar_turno) | None`; o desk de handoff é dono das regras (`_intercept`, `pending`, `blocked`, HANDOFF_*);
+    (2) `user_texts` injetado no construtor (fim do `raw_user_text` e da troca de lista); (3) um `CLIENT = OpenAI()`
+    por processo (antes 1 por agente = 1 handshake TLS cada); (4) `Triage.cost()`; construtor do desk sem defaults
+    (as factories são a única fonte de cada topologia); `AgentSpec.model` removido; `_transfer()`; (5) eval:
+    `known_failure` (morto no v2) removido, `RunResult.reply` derivado, `tool_result_contains(*names, text=)` único,
+    `fmean`; retry agora cobre 5xx/429 (um 503 derrubou o single); (6) provenance monta a própria msg de erro;
+    (7) testes: helper `request_access`, regras do handoff testadas no desk sem LLM. 28 testes + 1 xfail.
+    Pulados (mudam prompt/nota → exigiriam re-rodar eval): unificar texto "o que é do Suporte/Acessos" entre triagem do
+    routing e SPECS; extrair regras comuns de `_ROUTED`/`_TEAM`; enxugar histórico da triagem; negação por frase no
+    checker (módulo 8); eval em paralelo com processos (só tempo, não tokens); medir `cached_tokens` (módulo 8).
+    Smoke 1 run (8 10 15 29 31 34): routing 29 ❌ (variação conhecida), hub 15 ❌ — **triagem transferiu "capital da
+    França" para o Suporte em vez de recusar** (prompt, não refatoração). ⚠️ JSON do hub da comparação do passo 2 se
+    perdeu numa limpeza minha (números ficam aqui no CLAUDE.md).
+  - **Passo 4 feito (escala, N=3):** novo especialista **Conta** (`ACCOUNT_ROLE`, `request_password_reset` saiu do
+    Suporte + `get_my_profile`). Custo de mudança medido: single 0; routing = rótulo no schema + prompt da triagem
+    (ponto único de decisão) + tabela; **malha = 3 arestas, Suporte e Acessos ganharam tool nova**; **hub = 2 arestas,
+    só a triagem mudou** (os testes de "quem conhece quem" confirmaram). Transfer tools: malha N×(N−1), hub 2N →
+    empate em N=3 (6×6), hub vence a partir de N=4 (N=10: 90 × 20).
+    Eval N=3 (10 casos × 2): routing 85% · malha 95% · hub 90%; chamadas 4.2/4.1/5.0; custo US$ 0.00031/0.00045/0.00050.
+    Conta ajudou no caso 28 (reset do colega): hub 2/2 (antes as 3 falhavam) — prompt focado segue melhor suas regras.
+    Hub falha na TRIAGEM (15: respondeu "Paris"; 10: spoke não devolveu) → a entrada é ponto único de decisão.
+    Checker do caso 15 tinha buraco (só `no_tools`) → + `reply_not_contains("paris")`.
+    **Veredito da tese do aluno:** certa na forma HUB, no critério custo de mudança (e prompt por especialista não cresce
+    com N); em N=3 ainda não compensa em custo por conversa (2 saltos). Vantagens de token/confusão em N grande =
+    PROJEÇÃO, não medido. Produção costuma usar híbrido (hub na entrada + transfer direto entre pares frequentes).
+  - Aluno concordou com o veredito revisado. Passo 3 (nota de handoff gerada pelo CÓDIGO a partir do trace,
+    out-of-band) → **adiado para o módulo 6** (é defesa contra injection/falsificação). — 3º especialista (Conta: reset de senha + perfil, tirados
+    do Suporte), medir linhas de código/prompt alteradas e acerto/custo em malha × hub × routing. Depois passo 3.
+  - (antigo) aluno fechar a 1.4 (concorda com o veredito?) → commit de tudo desde a 1.3 (auth, tools, reorg,
     handoff, proveniência) → 1.5 (fechamento do módulo em `notes/SUMMARY.md`). Pendências registradas: descrição do
     `request_password_reset` (caso 28); checagem de sentido da justificativa → módulo 6.
 - [ ] 1.5 Fechamento: decisões consolidadas em `notes/SUMMARY.md`

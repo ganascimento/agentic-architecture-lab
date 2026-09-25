@@ -14,10 +14,10 @@ that's what lets the eval run the same cases against every architecture.
 Try it (calls the LLM):  python -m src --arch routing
 """
 
-from src.architectures.specialists import access_agent, support_agent
+from src.architectures.specialists import access_agent, account_agent, support_agent
 from src.architectures.triage import Triage
 from src.auth import Session
-from src.core.agent import Agent, ToolCall, Usage
+from src.core.agent import Agent, ToolCall, Usage, total_usage
 
 # Fixed reply, no LLM call: free and predictable, but it can't adapt to the user's language.
 OUT_OF_SCOPE_REPLY = "Sorry, I can only help with IT support topics."
@@ -27,17 +27,22 @@ class RoutingServiceDesk:
     def __init__(self, session: Session, verbose: bool = True):
         self.verbose = verbose
         self.triage = Triage()
+        # What the user REALLY typed (provenance check): the specialists' messages carry the triage's
+        # LLM-written restatement, which must not count as the user's words.
+        self.user_texts: list[str] = []
         # One instance per conversation: each specialist keeps ITS OWN history across turns.
         # That's the "state and context" decision: no agent sees the others' conversation.
         self.specialists: dict[str, Agent] = {
-            "support": support_agent(session, verbose),
-            "access": access_agent(session, verbose),
+            "support": support_agent(session, verbose, self.user_texts),
+            "access": access_agent(session, verbose, self.user_texts),
+            "account": account_agent(session, verbose, self.user_texts),
         }
         self.tool_calls: list[ToolCall] = []  # merged trace, in execution order (the eval reads it)
 
     def reply(self, user_text: str) -> str:
         # 1. Triage: one LLM call that returns a list of sub-requests.
-        requests = self.triage.route(user_text).requests or []
+        self.user_texts.append(user_text)
+        requests = self.triage.route(user_text).requests
         self._log(f"  🧭 triage: {[(r.specialist, r.request) for r in requests]}")
 
         # 2. Fan-out: one specialist at a time (sequential, on purpose — simpler to debug).
@@ -53,7 +58,7 @@ class RoutingServiceDesk:
             # Identity is NOT here anymore: it comes from the session, inside the agent.
             message = f"[original user message, context only]: {user_text}\n[your request]: {item.request}"
             before = len(agent.tool_calls)
-            answers.append(agent.reply(message, raw_user_text=user_text))  # provenance: raw text, not the triage's
+            answers.append(agent.reply(message))
             self.tool_calls += agent.tool_calls[before:]
 
         # 3. Combine: plain concatenation (no extra LLM call). A "synthesizer" would read better but cost more.
@@ -64,15 +69,10 @@ class RoutingServiceDesk:
     # --- Same accounting interface as the single agent (each model has its own price) ---
     @property
     def usage(self) -> Usage:
-        parts = [self.triage.usage, *(a.usage for a in self.specialists.values())]
-        return Usage(
-            calls=sum(u.calls for u in parts),
-            input_tokens=sum(u.input_tokens for u in parts),
-            output_tokens=sum(u.output_tokens for u in parts),
-        )
+        return total_usage([self.triage.usage, *(a.usage for a in self.specialists.values())])
 
     def cost(self) -> float:
-        return self.triage.usage.cost(self.triage.model.name) + sum(a.cost() for a in self.specialists.values())
+        return self.triage.cost() + sum(a.cost() for a in self.specialists.values())
 
     def _log(self, msg: str) -> None:
         if self.verbose:

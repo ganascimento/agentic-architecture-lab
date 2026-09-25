@@ -1,7 +1,7 @@
 """Terminal chat with the Service Desk.
 
 Run with:  python -m src                  (single agent)
-           python -m src --arch handoff   (single | routing | handoff)
+           python -m src --arch handoff   (single | routing | handoff | hub)
 Test accounts are in src/data.py (e.g. ana / ana123).
 """
 

@@ -42,8 +42,15 @@ def _in_user_words(word: str, user_words: set[str]) -> bool:
     return word in user_words or (len(word) >= 5 and any(len(u) >= 5 and u[:5] == word[:5] for u in user_words))
 
 
-def check(value: str, user_texts: list[str], request_text: str = "") -> str | None:
-    """None if `value` passes; otherwise the reason it was refused (sent back to the LLM)."""
+def check(arg: str, value: str, user_texts: list[str], request_text: str = "") -> str | None:
+    """None if `value` passes; otherwise the error message for the LLM (it should ask the user)."""
+    problem = _problem(value, user_texts, request_text)
+    if problem is None:
+        return None
+    return f"'{arg}' must be the user's own reason, but {problem}. Ask the user for it — don't write it yourself."
+
+
+def _problem(value: str, user_texts: list[str], request_text: str) -> str | None:
     if not value.strip():
         return "it is empty"
     leftover = content_words(value) - content_words(request_text) - _REQUEST_WORDS

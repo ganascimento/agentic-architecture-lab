@@ -5,19 +5,19 @@ Our code does the executing — which is why we can control what each agent is a
 """
 
 import json
+from collections.abc import Collection
 
 from openai.types.chat import ChatCompletionToolParam
 
 from src.auth import Session
-from src.tools import access, account, knowledge, tickets
-from src.tools import provenance
+from src.tools import access, account, knowledge, provenance, tickets
 
 _ALL = [*knowledge.TOOLS, *tickets.TOOLS, *access.TOOLS, *account.TOOLS]
 REGISTRY = {t.name: t for t in _ALL}
 TOOLS: list[ChatCompletionToolParam] = [t.definition for t in _ALL]  # everything (the single agent)
 
 
-def tools_for(names: set[str]) -> list[ChatCompletionToolParam]:
+def tools_for(names: Collection[str]) -> list[ChatCompletionToolParam]:
     """Subset of TOOLS — what one specialist is allowed to SEE."""
     return [t.definition for t in _ALL if t.name in names]
 
@@ -44,10 +44,9 @@ def run_tool(
     for arg in tool.from_user:
         # The other arguments ARE the request (e.g. the resource): their words don't prove anything.
         request_text = " ".join(str(v) for k, v in arguments.items() if k != arg)
-        problem = provenance.check(str(arguments.get(arg, "")), user_texts or [], request_text)
+        problem = provenance.check(arg, str(arguments.get(arg, "")), user_texts or [], request_text)
         if problem:
-            return (f"Error: '{arg}' must be the user's own reason, but {problem}. "
-                    f"Ask the user for it — don't write it yourself."), True
+            return f"Error: {problem}", True
     try:
         return json.dumps(tool.run(session, **arguments), ensure_ascii=False), False
     except Exception as e:  # noqa: BLE001 — any failure (incl. unexpected arguments) becomes feedback for the LLM

@@ -2,7 +2,7 @@
 
 Usage (venv active):
     python -m evals.run                         # single agent, all cases, 3 runs each
-    python -m evals.run --arch handoff          # single | routing | handoff
+    python -m evals.run --arch handoff          # single | routing | handoff | hub
     python -m evals.run --runs 1 --case 10 11
 """
 
@@ -10,6 +10,7 @@ import argparse
 import json
 import time
 from datetime import datetime
+from statistics import fmean
 from pathlib import Path
 
 import openai
@@ -28,7 +29,6 @@ def run_case(case: Case, arch: str) -> RunResult:
     start = time.perf_counter()
     replies = [agent.reply(turn) for turn in case.turns]
     return RunResult(
-        reply=replies[-1],
         replies=replies,
         tool_calls=agent.tool_calls,
         calls=agent.usage.calls,
@@ -38,12 +38,13 @@ def run_case(case: Case, arch: str) -> RunResult:
 
 
 def run_case_with_retry(case: Case, arch: str, attempts: int = 3) -> RunResult:
-    """A network blip says nothing about the agent: retry the whole run (from clean data) instead of crashing
-    the eval. Any other exception still crashes on purpose — that's a bug, not infrastructure."""
+    """A network blip or a 5xx/429 from the API says nothing about the agent: retry the whole run (from clean
+    data) instead of crashing the eval. Any other exception still crashes on purpose — that's a bug."""
     for attempt in range(1, attempts + 1):
         try:
             return run_case(case, arch)
-        except (openai.APIConnectionError, openai.APITimeoutError):
+        except (openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError,
+                openai.RateLimitError):
             if attempt == attempts:
                 raise
             print(f"  (case {case.id}: connection error, retrying {attempt}/{attempts - 1})")
@@ -69,42 +70,36 @@ def main() -> None:
         passed = sum(1 for f in failures if not f)
         row = {
             "id": case.id, "category": case.category, "turns": case.turns,
-            "passed": passed, "runs": args.runs, "known_failure": case.known_failure,
-            "avg_calls": sum(r.calls for r in runs) / len(runs),
-            "avg_cost": sum(r.cost for r in runs) / len(runs),
-            "avg_latency": sum(r.latency for r in runs) / len(runs),
+            "passed": passed, "runs": args.runs,
+            "avg_calls": fmean(r.calls for r in runs),
+            "avg_cost": fmean(r.cost for r in runs),
+            "avg_latency": fmean(r.latency for r in runs),
             "failures": [f for f in failures if f],
-            "replies": [r.reply for r in runs],
+            "replies": [r.replies[-1] for r in runs],  # final reply of each run
             "tools": [[t.name for t in r.tool_calls] for r in runs],
             # Arguments too: without them you can't tell WHY a call failed (e.g. an invented justification).
             "tool_args": [[{t.name: t.arguments} for t in r.tool_calls] for r in runs],
         }
         rows.append(row)
 
-        note = f"KNOWN: {case.known_failure}" if case.known_failure else ""
-        if row["failures"] and not case.known_failure:
-            note = "; ".join(sorted({msg for f in row["failures"] for msg in f}))
+        note = "; ".join(sorted({msg for f in row["failures"] for msg in f}))
         mark = "✅" if passed == args.runs else ("❌" if passed == 0 else "⚠️")
-        if case.known_failure:
-            mark = "🔶"
         print(f"{case.id:>3}  {case.category:<9} {mark}{passed}/{args.runs:<3} {row['avg_calls']:>5.1f} "
               f"{row['avg_cost']:>9.5f} {row['avg_latency']:>7.1f}  {note}")
 
-    scored = [r for r in rows if not r["known_failure"]]
-    total_runs = sum(r["runs"] for r in scored)
-    total_pass = sum(r["passed"] for r in scored)
+    total_runs = sum(r["runs"] for r in rows)
+    total_pass = sum(r["passed"] for r in rows)
     summary = {
         "arch": args.arch,
         "pass_rate": total_pass / total_runs if total_runs else 0.0,
-        "avg_calls": sum(r["avg_calls"] for r in rows) / len(rows),
-        "avg_cost": sum(r["avg_cost"] for r in rows) / len(rows),
-        "avg_latency": sum(r["avg_latency"] for r in rows) / len(rows),
+        "avg_calls": fmean(r["avg_calls"] for r in rows),
+        "avg_cost": fmean(r["avg_cost"] for r in rows),
+        "avg_latency": fmean(r["avg_latency"] for r in rows),
         "total_cost": sum(r["avg_cost"] * r["runs"] for r in rows),
     }
-    print(f"\nPass rate (scored cases): {summary['pass_rate']:.0%} ({total_pass}/{total_runs})"
+    print(f"\nPass rate: {summary['pass_rate']:.0%} ({total_pass}/{total_runs})"
           f" | avg per case: {summary['avg_calls']:.1f} calls, US$ {summary['avg_cost']:.5f},"
           f" {summary['avg_latency']:.1f}s | eval total: US$ {summary['total_cost']:.4f}")
-    print("🔶 = known failure (reported, not scored)")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"{args.arch}-{datetime.now():%Y%m%d-%H%M%S}.json"

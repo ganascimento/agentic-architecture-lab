@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import Protocol
 
-from src.architectures.handoff import HandoffServiceDesk
+from src.architectures.handoff import hub_desk, mesh_desk
 from src.architectures.routing import RoutingServiceDesk
 from src.architectures.single import single_agent
 from src.auth import Session
@@ -24,5 +24,6 @@ class ServiceDesk(Protocol):
 ARCHITECTURES: dict[str, Callable[[Session, bool], ServiceDesk]] = {
     "single": single_agent,          # lesson 1.2: one agent, every tool
     "routing": RoutingServiceDesk,   # lesson 1.3: triage + specialists (workflow)
-    "handoff": HandoffServiceDesk,   # lesson 1.4: agents transfer the conversation (peer-to-peer)
+    "handoff": mesh_desk,            # lesson 1.4: agents transfer the conversation (mesh / peer-to-peer)
+    "hub": hub_desk,                 # lesson 1.4: handoff hub-and-spoke (triage agent at the entry)
 }
