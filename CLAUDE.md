@@ -82,10 +82,20 @@ src/
     knowledge tickets access account + _schema (Tool) + provenance (argumento veio do usuário?)
   architectures/           # ARCHITECTURES + Protocol ServiceDesk (chat e eval usam o mesmo)
     single · routing (+ triage) · handoff (grafo: MESH e HUB) · specialists (Suporte, Acessos, Conta)
+  services/                # módulo 2+: agentes como serviços independentes (ex.: access_a2a = Acessos via A2A)
 tests/                     # sem LLM: tools, auth, architectures (inclui regras do handoff com fake tool calls)
 evals/                     # cases.py (v2: 35 casos, usuário logado, incl. diálogos multi-turno), run.py,
                            # results/ (JSON por execução; v1/ = dataset antigo, não comparável)
 ```
+
+## Organização por módulo
+
+- **Um código só, que evolui.** Cada módulo **acrescenta** peças (nova arquitetura, novo serviço) sem remover nem
+  quebrar as anteriores: `--arch single|routing|handoff|hub` continuam rodando, e o eval compara tudo.
+  Os testes do módulo anterior são a garantia — se quebrarem, o módulo novo invadiu o antigo.
+- **Fim de módulo = tag no git** (`module-1`, `module-2`...), publicada no GitHub. Revisitar lado a lado:
+  `git worktree add ../ia-learn-module1 module-1` (pasta separada, sem copiar nada no repo).
+- Nada de copiar o projeto por módulo (código duplicado diverge).
 
 ## Progresso
 
