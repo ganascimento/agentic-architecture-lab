@@ -82,7 +82,7 @@ src/
     knowledge tickets access account + _schema (Tool) + provenance (argumento veio do usuário?)
   architectures/           # ARCHITECTURES + Protocol ServiceDesk (chat e eval usam o mesmo)
     single · routing (+ triage) · handoff (grafo: MESH e HUB) · specialists (Suporte, Acessos, Conta)
-  services/                # módulo 2+: agentes como serviços independentes (ex.: access_a2a = Acessos via A2A)
+  services/                # módulo 2+: agentes como serviços independentes (access_a2a = Acessos via A2A)
 tests/                     # sem LLM: tools, auth, architectures (inclui regras do handoff com fake tool calls)
 evals/                     # cases.py (v2: 35 casos, usuário logado, incl. diálogos multi-turno), run.py,
                            # results/ (JSON por execução; v1/ = dataset antigo, não comparável)
@@ -90,11 +90,12 @@ evals/                     # cases.py (v2: 35 casos, usuário logado, incl. diá
 
 ## Organização por módulo
 
-- **Um código só, que evolui.** Cada módulo **acrescenta** peças (nova arquitetura, novo serviço) sem remover nem
-  quebrar as anteriores: `--arch single|routing|handoff|hub` continuam rodando, e o eval compara tudo.
-  Os testes do módulo anterior são a garantia — se quebrarem, o módulo novo invadiu o antigo.
-- **Fim de módulo = tag no git** (`module-1`, `module-2`...), publicada no GitHub. Revisitar lado a lado:
-  `git worktree add ../ia-learn-module1 module-1` (pasta separada, sem copiar nada no repo).
+- **`main` = o sistema atual** (módulo em andamento). O código reflete só o estado de agora: quando um módulo
+  substitui uma peça, a versão antiga SAI do `main` (sem manter tudo vivo — decisão do aluno no módulo 2).
+- **Fim de módulo:** criar a branch `module-N` (para navegar no GitHub) + a tag `module-N-final` (imutável) no
+  commit que fechou o módulo; o trabalho segue no `main`. Nomes de branch/tag em inglês.
+  Ex.: `module-1` / `module-1-final` → commit `40f6ef3`.
+- Revisitar lado a lado: `git worktree add ../ia-learn-module1 module-1-final`.
 - Nada de copiar o projeto por módulo (código duplicado diverge).
 
 ## Progresso
@@ -110,7 +111,14 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     delegado) + justificativa repassada perde proveniência (fronteira de confiança). Modos: síncrono, streaming (padrão
     em chat), polling, webhook (tarefa longa, com polling de reconciliação). Recomendado: task de acesso termina rápido
     (`pending_approval`); aprovação é outro fluxo (módulo 4).
-  - [ ] 2.2 — **PRÓXIMO**
+  - [x] 2.2 A2A mínimo à mão (stdlib): `src/services/access_a2a/` (Agent Card + JSON-RPC `SendMessage`, síncrono,
+    INPUT_REQUIRED → COMPLETED com o mesmo taskId; estado decidido pelo CÓDIGO) + `src/services/a2a_client.py`
+    (descoberta + envio, `show_wire`). ⚠️ identidade ingênua proposital (`metadata.userEmail`), teste
+    `test_naive_identity_is_forgeable` documenta — corrigir na 2.5. Perguntas de fixação da 2.2 em aberto.
+  - [ ] **PRÓXIMO:** reestruturar o `main` para o sistema do módulo 2: só HUB; Acessos só remoto (nó `access` vira
+    PROXY A2A sem LLM: INPUT_REQUIRED → próxima msg vai p/ a task; COMPLETED → volta à triagem); tools/dados de
+    acesso saem do Service Desk e ficam só no serviço; saem single/routing/triagem-classificador/malha (estão na
+    branch `module-1`); eval vira regressão do sistema atual e sobe o serviço sozinho.
 - [x] **Módulo 1 — Multi-Agent Architecture** (fechado pelo aluno em 2026-09-27)
   - 1.1 teoria · 1.2 single-agent · 1.3 eval + routing · 1.4 handoff (malha e hub) + auth + tools novas · 1.5 SUMMARY.
   - Resultados-chave (eval v2): single ~90% e o mais barato; routing melhor em vários pedidos/ambíguos (+~20% custo);
