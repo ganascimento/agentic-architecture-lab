@@ -91,7 +91,16 @@ evals/                     # cases.py (v2: 35 casos, usuário logado, incl. diá
 
 Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md` e o histórico do git.
 
-- **Módulo atual:** 2 — A2A (Agent2Agent). Ainda não começado.
+- **Módulo atual:** 2 — A2A (Agent2Agent). Plano: 2.1 teoria · 2.2 A2A mínimo à mão (Agent Card + SendMessage síncrono)
+  · 2.3 SDK oficial (tasks, INPUT_REQUIRED, streaming) · 2.4 Acessos vira serviço A2A + eval · 2.5 identidade entre serviços.
+  - [x] 2.1 teoria (spec **v1.0**: métodos `SendMessage`/`GetTask`..., estados MAIÚSCULOS; tutoriais antigos usam
+    `message/send` da v0.3 — referência é o SDK/spec da versão instalada). Correção dada: A2A é DELEGAÇÃO (≈ agent-as-tool),
+    não handoff; é transporte, não topologia. Aluno acertou: KB = MCP (tool), A2A só com agente do outro lado;
+    identidade no texto viola D4 → refinado em 2 camadas (quem chama = credencial do serviço; em nome de quem = token
+    delegado) + justificativa repassada perde proveniência (fronteira de confiança). Modos: síncrono, streaming (padrão
+    em chat), polling, webhook (tarefa longa, com polling de reconciliação). Recomendado: task de acesso termina rápido
+    (`pending_approval`); aprovação é outro fluxo (módulo 4).
+  - [ ] 2.2 — **PRÓXIMO**
 - [x] **Módulo 1 — Multi-Agent Architecture** (fechado pelo aluno em 2026-09-27)
   - 1.1 teoria · 1.2 single-agent · 1.3 eval + routing · 1.4 handoff (malha e hub) + auth + tools novas · 1.5 SUMMARY.
   - Resultados-chave (eval v2): single ~90% e o mais barato; routing melhor em vários pedidos/ambíguos (+~20% custo);
