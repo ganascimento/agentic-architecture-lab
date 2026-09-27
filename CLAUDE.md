@@ -25,6 +25,9 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
 - **Código em inglês**: nomes de pastas, arquivos, variáveis, funções, comentários, docstrings, prompts e
   dados de exemplo. O agente responde ao usuário final no idioma dele. As notas de revisão (`notes/SUMMARY.md`) ficam em PT-BR.
 - Ser honesto sobre hype: dizer quando algo é imaturo, controverso ou exagerado.
+- **Escada do código mínimo** (antes de escrever código novo): precisa existir? → já existe no projeto? →
+  a stdlib/SDK resolve? → uma dependência já instalada resolve? → só então escrever o mínimo que funciona.
+  Não vale para comentários didáticos nem para a versão "ingênua primeiro": clareza para aprender > menos linhas.
 - **Sempre alertar sobre falhas de segurança/arquitetura** que aparecerem nos testes ou no código (ex.: Achado 1.2),
   explicando o risco e a correção — mas, se for de autenticação/visual, só registrar na Fase final, sem implementar.
 
