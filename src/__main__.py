@@ -1,23 +1,20 @@
 """Terminal chat with the Service Desk.
 
-Run with:  python -m src                  (single agent)
-           python -m src --arch handoff   (single | routing | handoff | hub)
+Run (two terminals):  python -m src.services.access_a2a     ← the IAM team's Access agent (A2A service)
+                      python -m src                         ← the Service Desk
 Test accounts are in src/data.py (e.g. ana / ana123).
 """
 
-import argparse
 import getpass
+import urllib.error
 
 from src import data
-from src.architectures import ARCHITECTURES
+from src.architectures import service_desk
 from src.auth import login
+from src.config import ACCESS_AGENT_URL
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--arch", choices=ARCHITECTURES, default="handoff")
-    args = parser.parse_args()
-
     # Login first: from here on, WHO the user is comes from this session — nothing typed in the chat changes it.
     session = None
     while session is None:
@@ -25,12 +22,13 @@ def main() -> None:
         if session is None:
             print("Invalid credentials.\n")
 
-    new_desk = lambda: ARCHITECTURES[args.arch](session, True)
-    desk = new_desk()
-    print(
-        f"\nService Desk ({args.arch}) — logged in as {session.name} <{session.email}>"
-    )
-    print("Commands: /new (new conversation), /state (tickets and requests), /quit\n")
+    try:
+        desk = service_desk(session)
+    except urllib.error.URLError:
+        print(f"\nThe Access agent is not reachable at {ACCESS_AGENT_URL}. Start it: python -m src.services.access_a2a")
+        return
+    print(f"\nService Desk — logged in as {session.name} <{session.email}>")
+    print("Commands: /new (new conversation), /state (tickets), /quit\n")
 
     while True:
         try:
@@ -42,21 +40,19 @@ def main() -> None:
         if text == "/quit":
             break
         if text == "/new":
-            desk = new_desk()
+            desk = service_desk(session)
             print("(new conversation)\n")
             continue
         if text == "/state":
+            # Only OUR systems: access requests are the IAM team's data — ask the agent ("my access requests").
             print("Tickets:", data.TICKETS or "none")
-            print("Access requests:", data.ACCESS_REQUESTS or "none")
             print("Password resets:", data.PASSWORD_RESETS or "none", "\n")
             continue
 
         calls_before, cost_before = desk.usage.calls, desk.cost()
         answer = desk.reply(text)
         print(f"\nagent> {answer}")
-        print(
-            f"       [{desk.usage.calls - calls_before} model calls | US$ {desk.cost() - cost_before:.4f} this turn]\n"
-        )
+        print(f"       [{desk.usage.calls - calls_before} model calls | US$ {desk.cost() - cost_before:.4f} this turn]\n")
 
 
 if __name__ == "__main__":

@@ -50,10 +50,11 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
 - LLM (OpenAI, SDK `openai`, Chat Completions) — um modelo por papel, em `src/config.py`:
   - **Agentes: `gpt-6-luna`** com `reasoning_effort="none"` (no Chat Completions a Luna só faz tool calling com
     reasoning `none`; ligar reasoning exige Responses API).
-  - **Classificador do routing: `gpt-4o-mini`** — ⚠️ é MAIS caro por token que a Luna; a triagem do hub já usa a Luna.
-  - Envs: `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `CLASSIFIER_MODEL`.
-- Rodar (venv ativo): `python -m src --arch single|routing|handoff|hub` (chat, pede login — contas em
-  `src/data.py`, ex. ana/ana123) · `python -m pytest -q` (sem LLM) · `python -m evals.run --arch X [--case ...] [--runs N]`
+  - (gpt-4o-mini foi o classificador do routing no módulo 1 — ⚠️ é MAIS caro por token que a Luna.)
+  - Envs: `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `ACCESS_AGENT_URL` (default http://localhost:8001).
+- Rodar (venv ativo), dois terminais: `python -m src.services.access_a2a` (agente de Acessos do time de IAM, A2A)
+  e `python -m src` (Service Desk; pede login — contas em `src/data.py`, ex. ana/ana123).
+  `python -m pytest -q` (sem LLM) · `python -m evals.run [--case ...] [--runs N]` (sobe o serviço sozinho)
 - **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (35 casos × 3) só nos marcos.
 - `.env` na raiz com `OPENAI_API_KEY` (nunca commitar; está no `.gitignore`)
 - Módulo 1 sem framework de agentes (de propósito); LangGraph entra no módulo 4
@@ -77,15 +78,17 @@ src/
   __main__.py              # chat no terminal: login + --arch
   config.py  auth.py       # modelos/preços · login local → Session (identidade vem daqui, nunca do chat)
   data.py                  # "sistemas" fake: contas, diretório, KB, tickets, acessos, status de sistemas
-  core/agent.py            # loop genérico (Agent, ToolCall, Usage); gancho `intercept` p/ o dono tratar tools
-  tools/                   # um módulo por sistema (vira servidor MCP no módulo 3); Session injetada pelo código
-    knowledge tickets access account + _schema (Tool) + provenance (argumento veio do usuário?)
-  architectures/           # ARCHITECTURES + Protocol ServiceDesk (chat e eval usam o mesmo)
-    single · routing (+ triage) · handoff (grafo: MESH e HUB) · specialists (Suporte, Acessos, Conta)
-  services/                # módulo 2+: agentes como serviços independentes (access_a2a = Acessos via A2A)
-tests/                     # sem LLM: tools, auth, architectures (inclui regras do handoff com fake tool calls)
-evals/                     # cases.py (v2: 35 casos, usuário logado, incl. diálogos multi-turno), run.py,
-                           # results/ (JSON por execução; v1/ = dataset antigo, não comparável)
+  core/agent.py            # loop genérico (Agent, ToolCall, Usage); gancho `intercept`; `registry` de tools
+  tools/                   # sistemas DO SERVICE DESK (vira MCP no módulo 3): knowledge tickets account
+                           # + _schema (Tool) + provenance (argumento veio do usuário?). Sem tools de acesso.
+  architectures/           # service_desk() = HUB: handoff (grafo, triagem-agente) · specialists (Suporte, Conta)
+                           # · remote (RemoteAgent: nó do grafo que é agente de outro time via A2A, sem LLM)
+  services/                # agentes de OUTROS times como serviços
+    a2a_client.py          # cliente A2A mínimo (descoberta + SendMessage)
+    access_a2a/            # time de IAM: server (A2A à mão) · agent (ACCESS_ROLE) · tools · data (solicitações)
+tests/                     # sem LLM: tools, auth, a2a, architectures (serviço A2A falso em conftest.py)
+evals/                     # cases.py (35 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe o
+                           # serviço; custo/chamadas = nosso + remoto), results/ (v1/ = dataset antigo)
 ```
 
 ## Organização por módulo
@@ -115,10 +118,26 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     INPUT_REQUIRED → COMPLETED com o mesmo taskId; estado decidido pelo CÓDIGO) + `src/services/a2a_client.py`
     (descoberta + envio, `show_wire`). ⚠️ identidade ingênua proposital (`metadata.userEmail`), teste
     `test_naive_identity_is_forgeable` documenta — corrigir na 2.5. Perguntas de fixação da 2.2 em aberto.
-  - [ ] **PRÓXIMO:** reestruturar o `main` para o sistema do módulo 2: só HUB; Acessos só remoto (nó `access` vira
-    PROXY A2A sem LLM: INPUT_REQUIRED → próxima msg vai p/ a task; COMPLETED → volta à triagem); tools/dados de
-    acesso saem do Service Desk e ficam só no serviço; saem single/routing/triagem-classificador/malha (estão na
-    branch `module-1`); eval vira regressão do sistema atual e sobe o serviço sozinho.
+  - [x] Reestruturação do `main` (decisão do aluno: o código reflete só o sistema atual). Só HUB; Acessos só remoto:
+    nó `access` = `RemoteAgent` (sem LLM; INPUT_REQUIRED → próxima msg vai p/ a task; terminou → volta à triagem
+    no próximo turno, porque o remoto não sabe transferir → triagem manda para o externo POR ÚLTIMO). A triagem
+    aprende o que o Acessos faz pelo **Agent Card** (descrição da transfer vem do card). Tools/dados de acesso só
+    no serviço (least privilege pela arquitetura). Artifact com texto + **dado estruturado** (`accessRequest`).
+    Achado de segurança corrigido: IDOR no protocolo (contextId/taskId de outro usuário) → TaskNotFound.
+    Eval: checks de acesso pelo artifact (agente opaco → perdemos visibilidade das tentativas internas; qualidade
+    interna é do time de IAM). Smoke: 13/14 (15 = triagem manda trivia ao Suporte, conhecido); 3 runs casos 1/8/10:
+    100%, chamadas 5.0/3.0/8.0 (≈ hub local do módulo 1). ⚠️ caso 1: Suporte devolve o MESMO assunto à triagem (ping-pong).
+  - [x] /simplify do módulo 2 (sem mudar comportamento): `src/services/a2a_protocol.py` (o que os 2 lados
+    compartilham: versão, estados, `text_of`, `data_of`); `start()` único para subir o serviço (eval/testes/serve);
+    `AccessA2AService.usage/cost`; eval descobre o card uma vez; timeout curto na descoberta; trace do remoto guarda
+    estado + dado estruturado (checks leem o dado, não texto); `REMOTE`/`remotes`/`transfers` removidos (derivados).
+  - [ ] ⚠️ **BUG a corrigir (achado de altitude):** o servidor decide o estado por "nenhuma tool = está perguntando"
+    → quando o agente responde SEM tool (recusa injection do caso 12, "não é comigo"), a task fica INPUT_REQUIRED
+    para sempre e a conversa PRENDE no Acessos até `/new`. Correção proposta: tool de controle `ask_user` (capturada
+    pelo `intercept`) e default COMPLETED. Junto: manter o `contextId` entre tasks (hoje zera ao terminar → o agente
+    remoto perde a memória da conversa); ao terminar a task remota, devolver ao hub NO MESMO TURNO (tira a regra de
+    prompt "externo por último"). Também: servidor guarda conversas para sempre (TTL); keep-alive HTTP.
+  - [ ] Perguntas de fixação da 2.2 em aberto. Depois: 2.3 (SDK oficial).
 - [x] **Módulo 1 — Multi-Agent Architecture** (fechado pelo aluno em 2026-09-27)
   - 1.1 teoria · 1.2 single-agent · 1.3 eval + routing · 1.4 handoff (malha e hub) + auth + tools novas · 1.5 SUMMARY.
   - Resultados-chave (eval v2): single ~90% e o mais barato; routing melhor em vários pedidos/ambíguos (+~20% custo);

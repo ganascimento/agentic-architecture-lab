@@ -5,7 +5,8 @@
 Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, LangGraph, governance, RAG and evals, built step by step through an AI-powered IT Service Desk.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white)
-![OpenAI](https://img.shields.io/badge/OpenAI-gpt--6--luna_%2B_gpt--4o--mini-412991?style=flat&logo=openai&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-gpt--6--luna-412991?style=flat&logo=openai&logoColor=white)
+![A2A](https://img.shields.io/badge/A2A-v1.0-34A853?style=flat)
 ![Pytest](https://img.shields.io/badge/Pytest-0A9EDC?style=flat&logo=pytest&logoColor=white)
 
 </div>
@@ -15,28 +16,31 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 ## ✨ Features
 
 - 🧠 **Framework-free agent loop**: the model calls tools in a plain Python loop you can read end to end.
-- 📚 **Knowledge base lookup**: the agent follows official procedures before guiding the user.
-- 🎫 **Ticket escalation**: unresolved issues become L2 tickets with a structured summary.
-- 🔐 **Access requests with human approval**: the agent can only *register* a request; it has no tool that grants access.
-- 💰 **Cost and call tracking**: every turn shows model calls and estimated cost, so architectures can be compared with numbers.
+- 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account), who talk to the user directly.
+- 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC.
+- 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access.
+- 🧾 **Provenance checks**: the code verifies that an access justification came from the user's own words.
+- 💰 **Evals with numbers**: pass rate, model calls, cost and latency per case.
 
 ## 🛠 Tech Stack
 
 | Layer | Technology |
 |---|---|
 | Language | Python 3.12 |
-| LLM | OpenAI (`openai` SDK): `gpt-6-luna` for the agent (tools), `gpt-4o-mini` for classification |
+| LLM | OpenAI (`openai` SDK, Chat Completions): `gpt-6-luna` |
+| Agent-to-agent | A2A v1.0, JSON-RPC binding, hand-written with the stdlib (`http.server`, `urllib`) |
 | Config | `python-dotenv` |
 | Tests | `pytest` |
 
 ## 🗺 Roadmap
 
-Each module adds one concept to the same system.
+Each module adds one concept to the same system. `main` is the current system; every finished module is
+kept in its own branch (`module-N`) and tag (`module-N-final`).
 
 | # | Module | Status |
 |---|---|---|
-| 1 | Multi-Agent Architecture: single-agent baseline → supervisor + specialists | 🚧 in progress |
-| 2 | A2A (Agent2Agent protocol) | ⏳ |
+| 1 | Multi-Agent Architecture: single agent, routing, handoff (mesh and hub) | ✅ done — branch `module-1` |
+| 2 | A2A (Agent2Agent protocol) | 🚧 in progress |
 | 3 | MCP (Model Context Protocol) | ⏳ |
 | 4 | Advanced LangGraph: checkpoints, human-in-the-loop | ⏳ |
 | 5 | Agent Builder + Registry | ⏳ |
@@ -57,7 +61,6 @@ Each module adds one concept to the same system.
 git clone <repo-url>
 cd agentic-architecture-lab
 
-# Create and activate the virtual environment
 python3 -m venv .venv
 source .venv/bin/activate      # Windows (PowerShell): .venv\Scripts\Activate.ps1
 
@@ -71,47 +74,72 @@ cp .env.example .env   # then put your OpenAI API key in .env
 | Variable | Description | Required |
 |---|---|---|
 | `OPENAI_API_KEY` | OpenAI API key | ✅ |
-| `AGENT_MODEL` | Model for the agent that uses tools (default `gpt-6-luna`) | ⚪ optional |
-| `AGENT_REASONING_EFFORT` | Reasoning effort for the agent model (default `none`) | ⚪ optional |
-| `CLASSIFIER_MODEL` | Model for classification/routing (default `gpt-4o-mini`) | ⚪ optional |
+| `AGENT_MODEL` | Model for every agent (default `gpt-6-luna`) | ⚪ optional |
+| `AGENT_REASONING_EFFORT` | Reasoning effort (default `none`; the Chat Completions API only does tool calling with `none` for this model) | ⚪ optional |
+| `ACCESS_AGENT_URL` | Base URL of the Access agent (default `http://localhost:8001`); the rest comes from its Agent Card | ⚪ optional |
 
 ### Commands
 
-Every time you open a new terminal, activate the virtual environment first:
-
-```bash
-source .venv/bin/activate      # the prompt now starts with (.venv)
-```
-
-Then, with the venv active:
+Every new terminal needs the virtual environment active first: `source .venv/bin/activate`.
 
 | Command | What it does |
 |---|---|
-| `python -m src` | Starts the Service Desk chat |
+| `python -m src.services.access_a2a` | Starts the **Access agent** (the IAM team's A2A service) on port 8001 |
+| `python -m src` | Starts the **Service Desk** chat (needs the Access agent running) |
+| `python -m src.services.a2a_client` | A2A demo: discovers the Access agent and talks to it, printing the raw JSON on the wire |
 | `python -m pytest -q` | Runs the tests (no LLM calls, no cost) |
-| `python -m evals.run` | Runs the agent eval (calls the LLM, ~US$ 0.01) |
-| `pip install -r requirements.txt` | Installs/updates dependencies |
-| `deactivate` | Leaves the virtual environment |
+| `python -m evals.run` | Runs the eval (starts the Access agent by itself; calls the LLM) |
 
-### Running the chat
+### Running the Service Desk
+
+The Service Desk and the Access agent are two separate processes, so use **two terminals**:
 
 ```bash
+# terminal 1 — the IAM team's Access agent
+python -m src.services.access_a2a
+
+# terminal 2 — the Service Desk
 python -m src
 ```
 
-Chat commands: `/new` starts a new conversation, `/state` shows created tickets and access requests, `/quit` exits.
+Log in with a test account (plaintext passwords, study only):
+
+| Username | Password | User |
+|---|---|---|
+| `ana` | `ana123` | Ana Souza (Sales) |
+| `joao` | `joao123` | João Lima (Finance) |
+| `carlos` | `carlos123` | Carlos Reis (Sales manager) |
+| `marta` | `marta123` | Marta Alves (Finance manager) |
+
+Chat commands: `/new` starts a new conversation, `/state` shows tickets and password resets, `/quit` exits.
+Access requests live in the Access agent's service: ask the agent about them ("my access requests").
 
 Try these messages:
 
 ```
 my vpn won't connect
-I'm ana@company.com and I need access to the Finance folder
-I'm joao@company.com, the VPN has been down since yesterday and I need access to SAP
+I need access to the Finance folder for the monthly closing
+the VPN has been down since yesterday and I need access to SAP to post invoices
+I forgot my password
+```
+
+### Seeing A2A on the wire
+
+With the Access agent running, the demo client shows discovery and a two-step task (`INPUT_REQUIRED` → `COMPLETED`):
+
+```bash
+python -m src.services.a2a_client
+```
+
+```
+──► GET  /.well-known/agent-card.json        ◄── the Agent Card (skills, where to call)
+──► POST /a2a  {"method": "SendMessage", …}   ◄── task: TASK_STATE_INPUT_REQUIRED ("what's the justification?")
+──► POST /a2a  {… "taskId": …}                ◄── task: TASK_STATE_COMPLETED + artifact (REQ0002)
 ```
 
 ## 🧪 Testing
 
-The tools are deterministic, so their tests don't call the LLM:
+No test calls the LLM: the tools are deterministic, and the A2A tests serve a fake Access agent over real HTTP.
 
 ```bash
 python -m pytest -q
@@ -119,25 +147,30 @@ python -m pytest -q
 
 ## 📊 Evals
 
-The agent's behavior is measured with a mini-eval: 18 cases (knowledge base, tickets, access requests, two problems in one message, prompt injection, out of scope), each run 3 times and graded by code, based on which tools were called and what was replied.
+35 cases (knowledge base, tickets, access requests, several requests in one message, multi-turn dialogs, prompt injection, impersonation, IDOR, out of scope), graded by code. The eval starts the Access agent in a background thread, and adds its LLM cost to ours.
 
 ```bash
-python -m evals.run                   # all cases, 3 runs each
-python -m evals.run --runs 1 --case 10 11
+python -m evals.run                    # all cases, 3 runs each
+python -m evals.run --runs 1 --case 10 31
 ```
 
-Results are saved to `evals/results/` so architectures can be compared on pass rate, cost and latency.
+Results are saved to `evals/results/`.
 
 ## 📁 Project Structure
 
 ```
 src/
-├── agent.py      # The agent: system prompt + the tool-use loop
-├── config.py     # One model per role (classifier vs agent) + prices
-├── tools.py      # Tool definitions (what the LLM sees) and implementations (what the code runs)
-├── data.py       # Fake company systems: users, knowledge base, tickets
-└── __main__.py   # Terminal chat
-tests/            # Tool tests (no LLM calls)
-evals/            # Agent eval: cases, runner and saved results
-notes/            # Architecture notes and decisions (PT-BR)
+├── __main__.py            # Terminal chat: login + Service Desk
+├── config.py · auth.py    # Model/prices · local login → Session
+├── data.py                # Fake company systems: accounts, directory, KB, tickets, system status
+├── core/agent.py          # The generic agent loop
+├── tools/                 # The Service Desk's tools (knowledge, tickets, account) + provenance check
+├── architectures/         # The hub: triage + specialists, and the remote (A2A) node
+└── services/
+    ├── a2a_protocol.py    # What both sides of A2A share (version, task states, helpers)
+    ├── a2a_client.py      # Minimal A2A client (discovery + SendMessage)
+    └── access_a2a/        # The IAM team's Access agent as an A2A service (server, agent, tools, data)
+tests/                     # No-LLM tests
+evals/                     # Eval cases, runner and saved results
+notes/SUMMARY.md           # Study notes and architecture decisions (PT-BR)
 ```

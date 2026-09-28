@@ -10,20 +10,22 @@ from collections.abc import Collection
 from openai.types.chat import ChatCompletionToolParam
 
 from src.auth import Session
-from src.tools import access, account, knowledge, provenance, tickets
+from src.tools import account, knowledge, provenance, tickets
+from src.tools._schema import Tool
 
-_ALL = [*knowledge.TOOLS, *tickets.TOOLS, *access.TOOLS, *account.TOOLS]
-REGISTRY = {t.name: t for t in _ALL}
-TOOLS: list[ChatCompletionToolParam] = [t.definition for t in _ALL]  # everything (the single agent)
+# The Service Desk's systems. Access requests are NOT here since module 2: they belong to the IAM team's
+# service (src/services/access_a2a), so nothing in the Service Desk can create one by itself.
+REGISTRY: dict[str, Tool] = {t.name: t for t in [*knowledge.TOOLS, *tickets.TOOLS, *account.TOOLS]}
 
 
-def tools_for(names: Collection[str]) -> list[ChatCompletionToolParam]:
-    """Subset of TOOLS — what one specialist is allowed to SEE."""
-    return [t.definition for t in _ALL if t.name in names]
+def tools_for(names: Collection[str], registry: dict[str, Tool] = REGISTRY) -> list[ChatCompletionToolParam]:
+    """Subset of a registry — what one agent is allowed to SEE."""
+    return [t.definition for name, t in registry.items() if name in names]
 
 
 def run_tool(
     name: str, arguments: dict, session: Session, allowed: set[str] | None = None, user_texts: list[str] | None = None,
+    registry: dict[str, Tool] = REGISTRY,
 ) -> tuple[str, bool]:
     """Runs the tool the LLM asked for, as the logged-in user. Returns (result_as_text, is_error).
 
@@ -38,7 +40,7 @@ def run_tool(
     """
     if allowed is not None and name not in allowed:
         return f"Error: tool '{name}' is not available to this agent.", True
-    tool = REGISTRY.get(name)
+    tool = registry.get(name)
     if tool is None:
         return f"Unknown tool: {name}", True
     for arg in tool.from_user:

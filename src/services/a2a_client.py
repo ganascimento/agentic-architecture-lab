@@ -10,13 +10,15 @@ import json
 import urllib.request
 import uuid
 
-A2A_VERSION = "1.0"
+from src.services.a2a_protocol import A2A_VERSION, INPUT_REQUIRED, text_of
+
+DISCOVERY_TIMEOUT, SEND_TIMEOUT = 5, 600  # finding the card should be fast; the remote LLM may not be (10 min)
 
 
 class A2AClient:
     def __init__(self, base_url: str, show_wire: bool = False):
         self.show_wire = show_wire
-        self.card = self._http("GET", f"{base_url}/.well-known/agent-card.json")
+        self.card = self._http("GET", f"{base_url}/.well-known/agent-card.json", timeout=DISCOVERY_TIMEOUT)
         self.url = self.card["supportedInterfaces"][0]["url"]  # where to call comes from the card, not config
 
     def send(self, text: str, user_email: str, task_id: str | None = None, context_id: str | None = None) -> dict:
@@ -34,24 +36,17 @@ class A2AClient:
             raise RuntimeError(f"A2A error {response['error']['code']}: {response['error']['message']}")
         return response["result"]["task"]
 
-    def _http(self, method: str, url: str, body: dict | None = None) -> dict:
+    def _http(self, method: str, url: str, body: dict | None = None, timeout: int = SEND_TIMEOUT) -> dict:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, method=method,
                                      headers={"Content-Type": "application/json", "A2A-Version": A2A_VERSION})
         if self.show_wire:
             print(f"\n──► {method} {url}" + (f"\n{json.dumps(body, indent=2, ensure_ascii=False)}" if body else ""))
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
         if self.show_wire:
             print(f"◄── {json.dumps(result, indent=2, ensure_ascii=False)}")
         return result
-
-
-def text_of(task: dict) -> str:
-    """What the remote agent said: the question (INPUT_REQUIRED) or the result artifact (COMPLETED)."""
-    if task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED":
-        return " ".join(p["text"] for p in task["status"]["message"]["parts"])
-    return " ".join(p["text"] for a in task.get("artifacts", []) for p in a["parts"] if "text" in p)
 
 
 if __name__ == "__main__":
@@ -59,7 +54,7 @@ if __name__ == "__main__":
     print(f"\nDiscovered: {client.card['name']} — skills: {[s['id'] for s in client.card['skills']]}")
     task = client.send("preciso de acesso ao SAP", user_email="joao@company.com")
     print(f"\n[{task['status']['state']}] {text_of(task)}")
-    if task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED":  # the remote agent asked; WE ask the user
+    if task["status"]["state"] == INPUT_REQUIRED:  # the remote agent asked; WE ask the user
         task = client.send("é para lançar as notas fiscais do mês", user_email="joao@company.com",
                            task_id=task["id"], context_id=task["contextId"])
         print(f"\n[{task['status']['state']}] {text_of(task)}")

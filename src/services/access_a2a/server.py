@@ -13,17 +13,17 @@ Run:  python -m src.services.access_a2a        (port 8001)
 """
 
 import json
+import threading
 import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from src.architectures.specialists import ACCESS_ROLE, ACCESS_TOOLS
 from src.auth import Session, session_for
-from src.core.agent import Agent
-from src.tools import tools_for
+from src.core.agent import Agent, Usage, total_usage
+from src.services.a2a_protocol import A2A_VERSION, COMPLETED, INPUT_REQUIRED
+from src.services.access_a2a.agent import access_agent_for
 
 PORT = 8001
-A2A_VERSION = "1.0"
 
 def agent_card(port: int) -> dict:
     """The contract. The client calls whatever URL is here — a wrong URL means nobody can reach the agent."""
@@ -50,10 +50,6 @@ def agent_card(port: int) -> dict:
 
 # JSON-RPC 2.0 error codes (-32601/-32602/-32700 are standard; -32001 is A2A's TaskNotFound).
 PARSE_ERROR, METHOD_NOT_FOUND, INVALID_PARAMS, TASK_NOT_FOUND = -32700, -32601, -32602, -32001
-
-
-def access_agent_for(session: Session) -> Agent:
-    return Agent(session, ACCESS_ROLE, tools_for(ACCESS_TOOLS), verbose=True)
 
 
 class AccessA2AService:
@@ -88,23 +84,51 @@ class AccessA2AService:
             return _error(request, TASK_NOT_FOUND, f"Task not found: {task_id}")
         task = self.tasks.get(task_id or "") or {"id": str(uuid.uuid4()),
                                            "contextId": message.get("contextId") or str(uuid.uuid4())}
-        agent = self.agents.setdefault(task["contextId"], self.make_agent(session))
+        agent = self.agents.get(task["contextId"])
+        if agent is None:
+            agent = self.agents[task["contextId"]] = self.make_agent(session)
+        elif agent.session.email != session.email:
+            # IDOR on the protocol: knowing a contextId/taskId is not permission to continue someone's task.
+            # Same answer as "doesn't exist", so the error doesn't reveal that it does.
+            return _error(request, TASK_NOT_FOUND, f"Task not found: {task_id or task['contextId']}")
 
         before = len(agent.tool_calls)
         reply = agent.reply(text)
-        did_work = any(not t.is_error for t in agent.tool_calls[before:])
+        done = [t for t in agent.tool_calls[before:] if not t.is_error]
 
         # The STATE is our decision, not the LLM's: a successful tool call = the work was done (COMPLETED);
         # no work, just talk = the agent is asking the user something (INPUT_REQUIRED, e.g. the justification).
-        if did_work:
-            task["status"] = {"state": "TASK_STATE_COMPLETED"}
-            task["artifacts"] = [{"artifactId": str(uuid.uuid4()), "name": "result", "parts": [{"text": reply}]}]
+        if done:
+            task["status"] = {"state": COMPLETED}
+            # Two parts: text for the human, DATA for the machine (the caller doesn't parse prose to know what
+            # happened). It's the business result — the tool's internals stay inside (opaque agent).
+            task["artifacts"] = [{"artifactId": str(uuid.uuid4()), "name": "result",
+                                  "parts": [{"text": reply}, {"data": _business_result(done)}]}]
         else:
-            task["status"] = {"state": "TASK_STATE_INPUT_REQUIRED",
+            task["status"] = {"state": INPUT_REQUIRED,
                               "message": {"messageId": str(uuid.uuid4()), "role": "ROLE_AGENT",
                                           "parts": [{"text": reply}]}}
         self.tasks[task["id"]] = task
         return {"jsonrpc": "2.0", "id": request.get("id"), "result": {"task": task}}
+
+
+    # --- The IAM team's own bill (the eval adds it to ours to compare with module 1) ---
+    @property
+    def usage(self) -> Usage:
+        return total_usage([a.usage for a in self.agents.values()])
+
+    def cost(self) -> float:
+        return sum(a.cost() for a in self.agents.values())
+
+
+def _business_result(calls: list) -> dict:
+    result: dict = {}
+    for call in calls:
+        if call.name == "create_access_request":
+            result["accessRequest"] = json.loads(call.result)
+        elif call.name == "list_my_access_requests":
+            result["accessRequests"] = json.loads(call.result)
+    return result
 
 
 def _error(request: dict, code: int, message: str) -> dict:
@@ -140,7 +164,15 @@ def make_handler(service: AccessA2AService) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def start(service: AccessA2AService, port: int = 0, background: bool = True) -> tuple[ThreadingHTTPServer, str]:
+    """Serves the agent (port 0 = any free port). The eval and the tests run it in a background thread."""
+    server = ThreadingHTTPServer(("localhost", port), make_handler(service))
+    if background:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://localhost:{server.server_port}"
+
+
 def serve(port: int = PORT) -> None:
-    server = ThreadingHTTPServer(("localhost", port), make_handler(AccessA2AService()))
-    print(f"Access A2A agent on http://localhost:{port}  (card: /.well-known/agent-card.json)")
+    server, url = start(AccessA2AService(), port, background=False)
+    print(f"Access A2A agent on {url}  (card: /.well-known/agent-card.json)")
     server.serve_forever()

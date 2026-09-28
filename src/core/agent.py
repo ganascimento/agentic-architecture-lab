@@ -14,7 +14,8 @@ from openai.types.chat.chat_completion import Choice
 
 from src.auth import Session
 from src.config import AGENT, PRICES, ModelConfig
-from src.tools import run_tool
+from src.tools import REGISTRY, run_tool
+from src.tools._schema import Tool
 
 # One client for the whole process: each OpenAI() opens its own HTTP connection pool (a new TLS handshake
 # on every agent's first call). Agents are cheap config objects; the connection is not.
@@ -71,6 +72,7 @@ class Agent:
         verbose: bool = True,
         user_texts: list[str] | None = None,
         intercept: Intercept | None = None,
+        registry: dict[str, Tool] = REGISTRY,
     ):
         self.session = session  # who is logged in: passed by the CODE to every tool, never by the LLM
         self.model = model
@@ -86,10 +88,11 @@ class Agent:
         self.usage = Usage()
         self.tool_calls: list[ToolCall] = []  # the agent's "trace": every tool call, in order
         # What the user REALLY typed, kept by the code (not by the LLM): the source of truth for the provenance
-        # check. A desk that builds the messages itself (routing, handoff) passes its own list and fills it.
+        # check. A desk that builds the messages itself (the handoff desk) passes its own list and fills it.
         self._owns_user_texts = user_texts is None
         self.user_texts = [] if user_texts is None else user_texts
         self.intercept = intercept
+        self.registry = registry  # where its tools come from (the Service Desk's, or another team's service)
 
     def reply(self, user_text: str) -> str:
         if self._owns_user_texts:
@@ -159,7 +162,7 @@ class Agent:
         return worked, end_turn
 
     def _run_tool(self, name: str, arguments: dict) -> str:
-        result, is_error = run_tool(name, arguments, self.session, self.allowed_tools, self.user_texts)
+        result, is_error = run_tool(name, arguments, self.session, self.allowed_tools, self.user_texts, self.registry)
         self.tool_calls.append(ToolCall(name, arguments, result, is_error))
         self._log(f"  🔧 {name}({arguments})")
         self._log(f"     ↳ {'❌ ' if is_error else ''}{result[:200]}")

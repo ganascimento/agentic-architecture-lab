@@ -2,10 +2,26 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Access agent (A2A service)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src.services.access_a2a",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
       "name": "Service Desk: chat",
       "type": "debugpy",
       "request": "launch",
       "module": "src",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "A2A client demo",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src.services.a2a_client",
       "console": "integratedTerminal",
       "justMyCode": true
     },
@@ -17,6 +33,13 @@
       "args": ["-q", "${file}"],
       "console": "integratedTerminal",
       "justMyCode": true
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Access agent + Service Desk",
+      "configurations": ["Access agent (A2A service)", "Service Desk: chat"],
+      "stopAll": true
     }
   ]
 }

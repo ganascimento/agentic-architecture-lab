@@ -6,6 +6,8 @@ import pytest
 
 from src import data
 from src.auth import session_for
+from src.services.access_a2a import data as iam_data
+from src.services.access_a2a.tools import REGISTRY as IAM_TOOLS
 from src.tools import run_tool
 
 ANA = session_for("ana@company.com")
@@ -15,11 +17,13 @@ JOAO = session_for("joao@company.com")
 @pytest.fixture(autouse=True)
 def fresh_data():
     data.reset()
+    iam_data.reset()
 
 
 def request_access(session, resource: str, justification: str, *user_texts: str) -> tuple[str, bool]:
+    # The access tools are the IAM team's (module 2): they run with the service's own registry.
     return run_tool("create_access_request", {"resource": resource, "justification": justification},
-                    session, user_texts=list(user_texts))
+                    session, user_texts=list(user_texts), registry=IAM_TOOLS)
 
 
 def test_search_finds_vpn_article():
@@ -81,7 +85,7 @@ def test_invented_justification_is_refused():
                                       "preciso fazer um reset da minha senha e também preciso de acesso ao SAP")
     assert is_error is True
     assert "wasn't found in the user's messages" in result
-    assert data.ACCESS_REQUESTS.keys() == {"REQ0001"}  # nothing registered
+    assert iam_data.ACCESS_REQUESTS.keys() == {"REQ0001"}  # nothing registered
 
 
 @pytest.mark.xfail(strict=True, reason="Known limit: word provenance can't judge MEANING. After removing the request, "

@@ -1,29 +1,15 @@
-"""The architectures under study. Different classes, same shape — so the chat and the eval treat them alike."""
+"""The Service Desk. Since module 2 there's ONE architecture: the handoff hub, with Access as a remote A2A agent.
+(Module 1's single / routing / mesh live in the `module-1` branch.)"""
 
-from collections.abc import Callable
-from typing import Protocol
-
-from src.architectures.handoff import hub_desk, mesh_desk
-from src.architectures.routing import RoutingServiceDesk
-from src.architectures.single import single_agent
+from src.architectures.handoff import HandoffServiceDesk
 from src.auth import Session
-from src.core.agent import ToolCall, Usage
+from src.config import ACCESS_AGENT_URL
+from src.services.a2a_client import A2AClient
 
 
-class ServiceDesk(Protocol):
-    """What the chat and the eval need from an architecture (structural typing: no common base class)."""
-
-    tool_calls: list[ToolCall]
-
-    @property
-    def usage(self) -> Usage: ...
-    def reply(self, user_text: str) -> str: ...
-    def cost(self) -> float: ...
-
-
-ARCHITECTURES: dict[str, Callable[[Session, bool], ServiceDesk]] = {
-    "single": single_agent,          # lesson 1.2: one agent, every tool
-    "routing": RoutingServiceDesk,   # lesson 1.3: triage + specialists (workflow)
-    "handoff": mesh_desk,            # lesson 1.4: agents transfer the conversation (mesh / peer-to-peer)
-    "hub": hub_desk,                 # lesson 1.4: handoff hub-and-spoke (triage agent at the entry)
-}
+def service_desk(session: Session, verbose: bool = True, access: A2AClient | None = None) -> HandoffServiceDesk:
+    # Discovery happens here: reading the Access agent's card. If the service is down, this fails — on purpose,
+    # it's a real dependency now (another team's service), not a function in our process.
+    # Trade-off: re-discovering on every new conversation sees card changes at once; reusing a client (the eval)
+    # is cheaper but a stale card means our triage learns a new skill only on the next discovery.
+    return HandoffServiceDesk(session, access or A2AClient(ACCESS_AGENT_URL), verbose)

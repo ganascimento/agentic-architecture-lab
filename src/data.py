@@ -1,5 +1,6 @@
 """Fake in-memory data simulating the company's systems (accounts, user directory, knowledge base,
-ticketing, access requests, system status). In later modules this becomes real MCP servers / RAG."""
+ticketing, system status). In later modules this becomes real MCP servers / RAG.
+Access requests are NOT here since module 2: they're the IAM team's data (src/services/access_a2a/data.py)."""
 
 # Local accounts for the login. ⚠️ Plaintext passwords: acceptable ONLY because this is a study project.
 # Real systems store a slow hash (argon2/bcrypt) or, better, delegate login to an IdP (SSO/OIDC) — final phase.
@@ -96,16 +97,9 @@ _SEED_TICKETS = {
         "priority": "low", "status": "in_progress", "comments": ["L2: replacement cable requested."],
     },
 }
-_SEED_ACCESS_REQUESTS = {
-    "REQ0001": {
-        "email": "joao@company.com", "resource": "Finance BI dashboard", "justification": "monthly report",
-        "approver": "marta@company.com", "status": "pending_approval",
-    },
-}
 
 # "Tables" the tools fill in at runtime
 TICKETS: dict[str, dict] = {}
-ACCESS_REQUESTS: dict[str, dict] = {}
 PASSWORD_RESETS: list[str] = []  # emails a reset link was sent to
 
 
@@ -113,8 +107,6 @@ def reset() -> None:
     """Back to the initial state — each eval run starts from the same data."""
     TICKETS.clear()
     TICKETS.update({k: {**v, "comments": list(v["comments"])} for k, v in _SEED_TICKETS.items()})
-    ACCESS_REQUESTS.clear()
-    ACCESS_REQUESTS.update({k: dict(v) for k, v in _SEED_ACCESS_REQUESTS.items()})
     PASSWORD_RESETS.clear()
 
 
