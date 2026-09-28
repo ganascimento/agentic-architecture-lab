@@ -6,8 +6,12 @@ transfer tool our triage sees — if the IAM team adds a skill, our triage learn
 Handoff on top of A2A: A2A is DELEGATION (a task in, an artifact out), but the user keeps talking to it
 through us. Our rule, in code:
 - task INPUT_REQUIRED → it asked the user something: the next user message goes to THAT task (same taskId);
-- task finished        → the conversation goes back to the hub on the next turn (it can't transfer by itself:
-  it doesn't take part in our team's protocol — it has no transfer_to_triage).
+- task finished        → the conversation goes back to the hub IN THE SAME TURN (it can't transfer by itself:
+  it doesn't take part in our team's protocol — it has no transfer_to_triage). See handoff.py.
+
+Task ≠ context (A2A spec): a TASK is one unit of work (it ends); the CONTEXT is the conversation (it goes on).
+We keep the contextId across tasks, so "and what's the status of that request?" reaches an agent that
+remembers which request — a new task in the same context, not a stranger.
 """
 
 import json
@@ -31,6 +35,7 @@ class RemoteAgent:
         self.task: dict | None = (
             None  # the open remote task, while it waits for the user (INPUT_REQUIRED)
         )
+        self.context_id: str | None = None  # the remote conversation: outlives each task
         self.tool_calls: list[
             ToolCall
         ] = []  # one entry per A2A exchange: what the eval can observe
@@ -47,15 +52,15 @@ class RemoteAgent:
     def reply(self, user_text: str) -> tuple[str, bool]:
         """Relays the RAW user text (the remote agent's provenance check needs the user's own words).
         Returns (the remote agent's text, whether its task finished)."""
-        open_task = self.task
         task = self.client.send(
             user_text,
             user_email=self.session.email,
-            task_id=open_task and open_task["id"],
-            context_id=open_task and open_task["contextId"],
+            task_id=self.task and self.task["id"],  # continue the open task, if any; else the server starts one
+            context_id=self.context_id,
         )
         state = task["status"]["state"]
         self.task = None if state in FINISHED else task
+        self.context_id = task["contextId"]
         # The eval sees what the PROTOCOL returns — state + structured data — not the opaque agent's internals.
         result = json.dumps({"state": state, "data": data_of(task)}, ensure_ascii=False)
         self.tool_calls.append(

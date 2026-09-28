@@ -102,7 +102,7 @@ class Agent:
 
     def run(self) -> str:
         """The loop itself, over whatever is in self.messages (the handoff desk fills them before calling)."""
-        worked = False    # did a REAL tool run in this call?
+        worked = False    # did a REAL tool run successfully in this call? (a failed one has nothing to report)
         end_turn = False  # did the owner (intercept) ask to end the turn?
         # ======================= THE AGENT LOOP =======================
         for _ in range(self.max_steps):
@@ -141,7 +141,7 @@ class Agent:
         return choice
 
     def _execute_tool_calls(self, calls: list[ChatCompletionMessageToolCallUnion]) -> tuple[bool, bool]:
-        """Runs every tool call of one LLM answer. Returns (a real tool ran, the owner asked to end the turn)."""
+        """Runs every tool call of one LLM answer. Returns (a real tool succeeded, the owner asked to end the turn)."""
         worked = end_turn = False
         for call in calls:
             if call.type != "function":
@@ -155,18 +155,18 @@ class Agent:
                 self.tool_calls.append(ToolCall(name, arguments, result, False))
                 self._log(f"  🔀 {name}({arguments})")
             else:
-                result = self._run_tool(name, arguments)
-                worked = True
+                result, is_error = self._run_tool(name, arguments)
+                worked = worked or not is_error
             # One "tool" message per call, linked to the request by its id.
             self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
         return worked, end_turn
 
-    def _run_tool(self, name: str, arguments: dict) -> str:
+    def _run_tool(self, name: str, arguments: dict) -> tuple[str, bool]:
         result, is_error = run_tool(name, arguments, self.session, self.allowed_tools, self.user_texts, self.registry)
         self.tool_calls.append(ToolCall(name, arguments, result, is_error))
         self._log(f"  🔧 {name}({arguments})")
         self._log(f"     ↳ {'❌ ' if is_error else ''}{result[:200]}")
-        return result
+        return result, is_error
 
     @staticmethod
     def _final_text(choice: Choice) -> str:

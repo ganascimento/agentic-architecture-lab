@@ -44,15 +44,46 @@ def test_only_the_account_specialist_can_reset_passwords(client):
     assert {"request_password_reset", "get_my_profile"} <= desk.agents["account"].allowed_tools
 
 
+def _silent_hub(desk):
+    """Stands in for the hub's LLM: records that it was called and says nothing (nothing left to route)."""
+    calls = []
+    desk.agents["triage"].run = lambda: calls.append(desk.note) or ""
+    return calls
+
+
 def test_remote_task_waiting_for_input_keeps_the_conversation(client):
     # The fake remote asks for a justification: the NEXT user message must go to that same task.
     desk = service_desk(ANA, False, client)
+    hub_calls = _silent_hub(desk)
     desk.active = "access"
     desk.reply("preciso de acesso à pasta Financeiro")
-    assert desk.active == "access" and desk.agents["access"].task is not None
+    assert desk.active == "access" and desk.agents["access"].task is not None and not hub_calls
     answer = desk.reply("é para o fechamento")
     assert "REQ0002" in answer
-    assert desk.active == "triage"  # finished remote task → back to the hub for the next turn
+    # Finished remote task → back to the hub in the SAME turn (to route anything left), with a note saying so.
+    assert desk.active == "triage" and len(hub_calls) == 1 and "access agent finished" in hub_calls[0]
+
+
+def test_changing_subject_mid_task_does_not_trap_the_conversation(client):
+    # The bug from the user's point of view: the remote asked for a justification, the user changed subject.
+    desk = service_desk(ANA, False, client)
+    hub_calls = _silent_hub(desk)
+    desk.active = "access"
+    desk.reply("preciso de acesso à pasta Financeiro")
+    desk.reply("deixa pra lá, minha VPN caiu")
+    assert desk.active == "triage" and len(hub_calls) == 1  # the hub got it back — it can route the VPN part
+
+
+def test_remote_context_survives_across_tasks(client, service):
+    # Task ≠ context: a new task after one finished continues the SAME remote conversation (same agent memory).
+    desk = service_desk(ANA, False, client)
+    _silent_hub(desk)
+    desk.active = "access"
+    desk.reply("preciso de acesso, justificativa: fechamento")  # task 1 → COMPLETED
+    desk.active = "access"
+    desk.reply("qual o status daquele acesso?")                  # task 2, same context
+    (remote,) = service.agents.values()  # ONE conversation on the server, not two strangers
+    assert len(remote.messages) == 2
 
 
 def test_blocked_transfer_is_not_a_handoff(client):

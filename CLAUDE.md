@@ -131,12 +131,15 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     compartilham: versão, estados, `text_of`, `data_of`); `start()` único para subir o serviço (eval/testes/serve);
     `AccessA2AService.usage/cost`; eval descobre o card uma vez; timeout curto na descoberta; trace do remoto guarda
     estado + dado estruturado (checks leem o dado, não texto); `REMOTE`/`remotes`/`transfers` removidos (derivados).
-  - [ ] ⚠️ **BUG a corrigir (achado de altitude):** o servidor decide o estado por "nenhuma tool = está perguntando"
-    → quando o agente responde SEM tool (recusa injection do caso 12, "não é comigo"), a task fica INPUT_REQUIRED
-    para sempre e a conversa PRENDE no Acessos até `/new`. Correção proposta: tool de controle `ask_user` (capturada
-    pelo `intercept`) e default COMPLETED. Junto: manter o `contextId` entre tasks (hoje zera ao terminar → o agente
-    remoto perde a memória da conversa); ao terminar a task remota, devolver ao hub NO MESMO TURNO (tira a regra de
-    prompt "externo por último"). Também: servidor guarda conversas para sempre (TTL); keep-alive HTTP.
+  - [x] **BUG do estado da task corrigido (achado de altitude):** era "nenhuma tool = está perguntando" → recusa/
+    "não é comigo" deixava a task INPUT_REQUIRED para sempre (conversa presa no Acessos até `/new`). Agora: tool de
+    CONTROLE `ask_user` (capturada pelo `intercept`) = INPUT_REQUIRED; default COMPLETED (falha para o lado seguro).
+    Junto: `contextId` mantido entre tasks (task ≠ context); task remota terminou → volta ao hub NO MESMO TURNO
+    (saiu a regra "externo por último"; custo +1 chamada da triagem); loop só conta tool com SUCESSO como `worked`.
+    Efeito colateral medido: tool de perguntar barata → modelo pergunta demais (caso 10 caiu p/ 0/3) → prompt diz
+    quando NÃO perguntar e "não julgue o mérito, o gestor decide" (D2). Eval acesso/multi/segurança 3 runs: 97%
+    (18 = 2/3, ainda pergunta às vezes). Full 1 run: 31/35 (2, 11 = ping-pong Suporte↔triagem conhecido; 15).
+    Pendente: TTL das conversas no servidor e keep-alive HTTP (2.3, SDK tem TaskStore).
   - [ ] Perguntas de fixação da 2.2 em aberto. Depois: 2.3 (SDK oficial).
 - [x] **Módulo 1 — Multi-Agent Architecture** (fechado pelo aluno em 2026-09-27)
   - 1.1 teoria · 1.2 single-agent · 1.3 eval + routing · 1.4 handoff (malha e hub) + auth + tools novas · 1.5 SUMMARY.

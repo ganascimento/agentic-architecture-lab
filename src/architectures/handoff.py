@@ -55,7 +55,7 @@ How to work:
 - Ask ONE short question only when you can't tell WHICH agent should handle it (e.g. "I have a problem with
   SAP": slowness/error or missing permission?). Details like error codes are the specialist's job, not yours.
 - Several requests in one message: transfer to the agent of the first one; you'll get the conversation back
-  for the rest. The access agent is EXTERNAL and can't give the conversation back: leave it for LAST.
+  for the rest.
 - Greetings and thanks: reply briefly yourself."""
 
 # Every agent runs on AGENT — even the triage: gpt-4o-mini ("the cheap classifier") costs MORE per token.
@@ -122,6 +122,11 @@ HANDOFF_IGNORED = (
     "Ignored: only one transfer per answer. The next agent will route what is left."
 )
 HANDOFF_BLOCKED = "Not transferred: that agent already handled its part in this turn. Reply to the user yourself."
+# What the hub hears when a remote agent's task ends (it can't call transfer_to_triage: the CODE hands back).
+REMOTE_FINISHED = (
+    "The {name} agent finished its task. If the user's messages have a request nobody answered yet, transfer it; "
+    "otherwise reply with an empty message (the user already got the answer)."
+)
 
 
 def _transfer(target: str) -> str:
@@ -207,11 +212,13 @@ class HandoffServiceDesk:
             self.pending = None
             before = len(node.tool_calls)
             if isinstance(node, RemoteAgent):
-                # Another team's agent: relay the user's raw words over A2A. When its task finishes, the
-                # conversation returns to the hub on the NEXT turn (it can't transfer by itself).
+                # Another team's agent: relay the user's raw words over A2A. When its task finishes, the CODE
+                # hands the conversation back to the hub in the SAME turn (the remote can't transfer by itself),
+                # so the rest of a multi-request message isn't left waiting for the user's next message.
+                # Cost: +1 hub call per finished remote task (usually just to say "nothing left").
                 text, finished = node.reply(user_text)
                 if finished:
-                    self.active = ENTRY
+                    self.pending, self.note = ENTRY, REMOTE_FINISHED.format(name=name)
             else:
                 node.messages = [
                     node.messages[0],
@@ -236,7 +243,7 @@ class HandoffServiceDesk:
                 )
 
             if self.pending is None:
-                break  # turn over: this agent stays active for the next turn (a finished remote went back to the hub)
+                break  # turn over: this agent stays active for the next turn
             if handoffs == MAX_HANDOFFS:
                 self._log("  ⛔ handoff limit reached")  # code stops the ping-pong
                 break

@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from src.auth import Session, session_for
 from src.core.agent import Agent, Usage, total_usage
 from src.services.a2a_protocol import A2A_VERSION, COMPLETED, INPUT_REQUIRED
-from src.services.access_a2a.agent import access_agent_for
+from src.services.access_a2a.agent import ASK_USER, access_agent_for
 
 PORT = 8001
 
@@ -94,20 +94,25 @@ class AccessA2AService:
 
         before = len(agent.tool_calls)
         reply = agent.reply(text)
-        done = [t for t in agent.tool_calls[before:] if not t.is_error]
+        calls = agent.tool_calls[before:]
+        question = next((c.arguments.get("question", "") for c in calls if c.name == ASK_USER), None)
 
-        # The STATE is our decision, not the LLM's: a successful tool call = the work was done (COMPLETED);
-        # no work, just talk = the agent is asking the user something (INPUT_REQUIRED, e.g. the justification).
-        if done:
-            task["status"] = {"state": COMPLETED}
-            # Two parts: text for the human, DATA for the machine (the caller doesn't parse prose to know what
-            # happened). It's the business result — the tool's internals stay inside (opaque agent).
-            task["artifacts"] = [{"artifactId": str(uuid.uuid4()), "name": "result",
-                                  "parts": [{"text": reply}, {"data": _business_result(done)}]}]
-        else:
+        # The STATE is the code's decision, from an EXPLICIT signal: the agent called ask_user → INPUT_REQUIRED.
+        # Anything else → COMPLETED, with or without work done. Default to COMPLETED because it fails SAFE:
+        # if the LLM forgets ask_user and just writes a question, the task closes and the user's answer goes back
+        # to the caller's hub (one extra hop) — instead of trapping the conversation here (the old default).
+        if question is not None:
             task["status"] = {"state": INPUT_REQUIRED,
                               "message": {"messageId": str(uuid.uuid4()), "role": "ROLE_AGENT",
-                                          "parts": [{"text": reply}]}}
+                                          "parts": [{"text": reply or question}]}}
+        else:
+            task["status"] = {"state": COMPLETED}
+            # Text for the human, DATA for the machine (the caller doesn't parse prose to know what happened).
+            # It's the business result — the tool's internals stay inside (opaque agent).
+            parts: list[dict] = [{"text": reply}]
+            if result := _business_result([c for c in calls if not c.is_error]):
+                parts.append({"data": result})
+            task["artifacts"] = [{"artifactId": str(uuid.uuid4()), "name": "result", "parts": parts}]
         self.tasks[task["id"]] = task
         return {"jsonrpc": "2.0", "id": request.get("id"), "result": {"task": task}}
 

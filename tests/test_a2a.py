@@ -23,6 +23,16 @@ def test_task_goes_input_required_then_completed(client):
     assert data_of(done) == {"accessRequest": {"request": "REQ0002"}}
 
 
+def test_a_reply_without_ask_user_completes_the_task(client):
+    # The old bug: "no tool ran = it's asking" left this task INPUT_REQUIRED forever — the user's conversation
+    # was trapped in the remote agent. Now INPUT_REQUIRED needs the explicit signal (ask_user); default COMPLETED.
+    task = client.send("preciso de acesso à pasta Financeiro", user_email="ana@company.com")
+    done = client.send("deixa pra lá, minha VPN caiu", user_email="ana@company.com",
+                       task_id=task["id"], context_id=task["contextId"])
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert data_of(done) == {}  # nothing was registered: no data part
+
+
 def test_unknown_task_is_a_jsonrpc_error(client):
     with pytest.raises(RuntimeError, match="-32001"):
         client.send("oi", user_email="ana@company.com", task_id="does-not-exist")
