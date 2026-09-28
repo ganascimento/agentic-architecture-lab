@@ -1,121 +1,183 @@
-"""The Access agent as an independent A2A service — hand-written with the stdlib (lesson 2.2).
+"""The Access agent as an independent A2A service — on the official SDK (lesson 2.3; `a2a-sdk`, spec v1.0).
 
 Imagine this runs on the IAM team's infrastructure. From the outside it's OPAQUE: callers see the Agent Card
-and the messages; the prompt, the model and the tools stay inside. Inside, it's the same Access agent as
-module 1 (same role, same tools) — only the way you reach it changed: HTTP + JSON-RPC 2.0 instead of a call.
+and the messages; the prompt, the model and the tools stay inside.
 
-What travels on the wire (A2A v1.0, JSON-RPC binding):
-    GET  /.well-known/agent-card.json                → the Agent Card (who am I, skills, where to call)
-    POST /a2a  {"method": "SendMessage", ...}        → {"result": {"task": {...}}}
+What the SDK took off our hands (lesson 2.2 did it by hand, see git history): JSON-RPC parsing and errors,
+the task store, building Task/status/artifact objects, validating the spec's types — and it adds, for free,
+streaming (SSE), GetTask, CancelTask and push notifications.
+What is STILL OURS, because no SDK knows our business:
+- the task STATE decision (ask_user → INPUT_REQUIRED, anything else → COMPLETED), in `AccessExecutor.execute`;
+- the agent's memory per conversation (the SDK stores tasks, not our LLM's history);
+- who the user is (the SDK asks us through a ServerCallContextBuilder — see NaiveIdentity).
 
-No SDK on purpose: this is the naive version, to see what the SDK hides (lesson 2.3 migrates to it).
 Run:  python -m src.services.access_a2a        (port 8001)
 """
 
+import asyncio
 import json
+import socket
 import threading
-import uuid
+import time
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import uvicorn
+from a2a.auth.user import User
+from a2a.helpers import new_data_part, new_task_from_user_message, new_text_part
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import (
+    DefaultServerCallContextBuilder,
+    create_agent_card_routes,
+    create_jsonrpc_routes,
+)
+from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentInterface,
+    AgentSkill,
+    InvalidParamsError,
+)
+from a2a.utils import AGENT_CARD_WELL_KNOWN_PATH
+from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
+from starlette.applications import Starlette
+from starlette.requests import Request
 
 from src.auth import Session, session_for
 from src.core.agent import Agent, Usage, total_usage
-from src.services.a2a_protocol import A2A_VERSION, COMPLETED, INPUT_REQUIRED
+from src.services.a2a_protocol import USER_HEADER
 from src.services.access_a2a.agent import ASK_USER, access_agent_for
 
 PORT = 8001
+RPC_PATH = "/a2a"
 
-def agent_card(port: int) -> dict:
-    """The contract. The client calls whatever URL is here — a wrong URL means nobody can reach the agent."""
-    return {
-        "name": "Access Request Agent",
-        "description": "Registers access requests to folders and systems (pending manager approval) and reports "
-                       "their status. Never grants access.",
-        "version": "1.0.0",
-        "supportedInterfaces": [{"url": f"http://localhost:{port}/a2a", "protocolBinding": "JSONRPC",
-                                 "protocolVersion": A2A_VERSION}],
-        "capabilities": {"streaming": False, "pushNotifications": False},
-        "defaultInputModes": ["text/plain"],
-        "defaultOutputModes": ["text/plain"],
-        "skills": [
-            {"id": "access-request", "name": "Register an access request",
-             "description": "Registers a request for access to a folder or system, with the user's justification.",
-             "tags": ["access", "permission", "iam"],
-             "examples": ["I need access to the Finance folder for the monthly closing"]},
-            {"id": "access-status", "name": "Access request status",
-             "description": "Lists the user's access requests and their approval status.",
-             "tags": ["access", "status"], "examples": ["Was my SAP access request approved?"]},
+
+def agent_card(port: int) -> AgentCard:
+    """The contract. Now a TYPED object: a misspelled field fails here, not when another team calls us."""
+    return AgentCard(
+        name="Access Request Agent",
+        description="Registers access requests to folders and systems (pending manager approval) and reports "
+        "their status. Never grants access.",
+        version="1.0.0",
+        supported_interfaces=[
+            AgentInterface(
+                url=f"http://localhost:{port}{RPC_PATH}",
+                protocol_binding=TransportProtocol.JSONRPC,
+                protocol_version=PROTOCOL_VERSION_CURRENT,
+            )
         ],
-    }
+        # streaming=True: the caller can watch progress (SSE) instead of staring at a silent terminal.
+        capabilities=AgentCapabilities(streaming=True, push_notifications=False),
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain", "application/json"],
+        skills=[
+            AgentSkill(
+                id="access-request",
+                name="Register an access request",
+                description="Registers a request for access to a folder or system, with the user's "
+                "justification.",
+                tags=["access", "permission", "iam"],
+                examples=[
+                    "I need access to the Finance folder for the monthly closing"
+                ],
+            ),
+            AgentSkill(
+                id="access-status",
+                name="Access request status",
+                description="Lists the user's access requests and their approval status.",
+                tags=["access", "status"],
+                examples=["Was my SAP access request approved?"],
+            ),
+        ],
+    )
 
-# JSON-RPC 2.0 error codes (-32601/-32602/-32700 are standard; -32001 is A2A's TaskNotFound).
-PARSE_ERROR, METHOD_NOT_FOUND, INVALID_PARAMS, TASK_NOT_FOUND = -32700, -32601, -32602, -32001
+
+# --- Who is calling ---------------------------------------------------------------------------------------
+class EmailUser(User):
+    def __init__(self, email: str):
+        self.email = email
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self.email)
+
+    @property
+    def user_name(
+        self,
+    ) -> (
+        str
+    ):  # the SDK's task store is scoped by this: one user can't see another's tasks
+        return self.email
 
 
-class AccessA2AService:
-    """The protocol logic, separate from HTTP so it can be tested without a server or an LLM."""
+class NaiveIdentity(DefaultServerCallContextBuilder):
+    """⚠️ INSECURE ON PURPOSE (lesson 2.2's flaw, moved to the right place): the caller SAYS who the user is in a
+    header, and we believe it. Anyone who can reach this port can act as anyone.
+    The PLACE is right, though: the SDK asks "who is this?" here, per request, before any business code runs.
+    Lesson 2.5 keeps this seam and swaps the header for a signed token that we VERIFY."""
+
+    def build_user(self, request: Request) -> User:
+        return EmailUser(request.headers.get(USER_HEADER, ""))
+
+
+# --- The agent behind the protocol ------------------------------------------------------------------------
+class AccessExecutor(AgentExecutor):
+    """The SDK calls execute() once per message; we publish what happened as events (TaskUpdater)."""
 
     def __init__(self, make_agent: Callable[[Session], Agent] = access_agent_for):
         self.make_agent = make_agent
-        self.agents: dict[str, Agent] = {}  # contextId → the agent holding that conversation (its state)
-        self.tasks: dict[str, dict] = {}
+        # (user, contextId) → the agent holding that conversation. The user is PART OF THE KEY: someone else's
+        # contextId just opens a fresh conversation of your own — the IDOR is impossible by construction.
+        self.agents: dict[tuple[str, str], Agent] = {}
 
-    def handle(self, request: dict) -> dict:
-        if request.get("method") != "SendMessage":
-            return _error(request, METHOD_NOT_FOUND, f"Method not found: {request.get('method')}")
-        params = request.get("params") or {}
-        message = params.get("message") or {}
-        text = " ".join(p["text"] for p in message.get("parts", []) if "text" in p)
-        if not text:
-            return _error(request, INVALID_PARAMS, "The message needs at least one text part.")
-
-        # ⚠️ INSECURE ON PURPOSE (lesson 2.2): the caller SAYS who the user is, and we believe it.
-        # Anyone who can POST here can act as anyone — Finding 1.2 again, now between services.
-        # Lesson 2.5 replaces this with a token signed by the identity side (token exchange).
-        email = (params.get("metadata") or {}).get("userEmail", "")
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        email = context.call_context.user.user_name
         try:
             session = session_for(email)
         except KeyError:
-            return _error(request, INVALID_PARAMS, f"Unknown user: {email!r}")
+            raise InvalidParamsError(message=f"Unknown user: {email!r}") from None
+        if (
+            context.current_task is None
+        ):  # a new task: it must exist before any status update
+            await event_queue.enqueue_event(new_task_from_user_message(context.message))
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        # WORKING: with streaming, the caller sees this right away — while our LLM is still thinking.
+        await updater.start_work(
+            updater.new_agent_message([new_text_part("Checking your request...")])
+        )
 
-        # Continue an interrupted task (INPUT_REQUIRED) or start a new one.
-        task_id = message.get("taskId")
-        if task_id and task_id not in self.tasks:
-            return _error(request, TASK_NOT_FOUND, f"Task not found: {task_id}")
-        task = self.tasks.get(task_id or "") or {"id": str(uuid.uuid4()),
-                                           "contextId": message.get("contextId") or str(uuid.uuid4())}
-        agent = self.agents.get(task["contextId"])
-        if agent is None:
-            agent = self.agents[task["contextId"]] = self.make_agent(session)
-        elif agent.session.email != session.email:
-            # IDOR on the protocol: knowing a contextId/taskId is not permission to continue someone's task.
-            # Same answer as "doesn't exist", so the error doesn't reveal that it does.
-            return _error(request, TASK_NOT_FOUND, f"Task not found: {task_id or task['contextId']}")
-
+        key = (email, context.context_id)
+        if key not in self.agents:
+            self.agents[key] = self.make_agent(session)
+        agent = self.agents[key]
         before = len(agent.tool_calls)
-        reply = agent.reply(text)
+        # Our Agent is synchronous (sync OpenAI client); the SDK is asyncio. to_thread = the simplest bridge
+        # (the alternative, AsyncOpenAI, would rewrite the loop for no gain here).
+        reply = await asyncio.to_thread(agent.reply, context.get_user_input())
         calls = agent.tool_calls[before:]
-        question = next((c.arguments.get("question", "") for c in calls if c.name == ASK_USER), None)
+        question = next(
+            (c.arguments.get("question", "") for c in calls if c.name == ASK_USER), None
+        )
 
-        # The STATE is the code's decision, from an EXPLICIT signal: the agent called ask_user → INPUT_REQUIRED.
-        # Anything else → COMPLETED, with or without work done. Default to COMPLETED because it fails SAFE:
-        # if the LLM forgets ask_user and just writes a question, the task closes and the user's answer goes back
-        # to the caller's hub (one extra hop) — instead of trapping the conversation here (the old default).
+        # The STATE is the code's decision, from an EXPLICIT signal — the SDK only publishes it.
+        # ask_user → INPUT_REQUIRED; anything else → COMPLETED (fails safe: never traps the caller's conversation).
         if question is not None:
-            task["status"] = {"state": INPUT_REQUIRED,
-                              "message": {"messageId": str(uuid.uuid4()), "role": "ROLE_AGENT",
-                                          "parts": [{"text": reply or question}]}}
-        else:
-            task["status"] = {"state": COMPLETED}
-            # Text for the human, DATA for the machine (the caller doesn't parse prose to know what happened).
-            # It's the business result — the tool's internals stay inside (opaque agent).
-            parts: list[dict] = [{"text": reply}]
-            if result := _business_result([c for c in calls if not c.is_error]):
-                parts.append({"data": result})
-            task["artifacts"] = [{"artifactId": str(uuid.uuid4()), "name": "result", "parts": parts}]
-        self.tasks[task["id"]] = task
-        return {"jsonrpc": "2.0", "id": request.get("id"), "result": {"task": task}}
+            await updater.requires_input(
+                updater.new_agent_message([new_text_part(reply or question)])
+            )
+            return
+        # Text for the human, DATA for the machine (the caller doesn't parse prose to know what happened).
+        parts = [new_text_part(reply)]
+        if result := _business_result([c for c in calls if not c.is_error]):
+            parts.append(new_data_part(result))
+        await updater.add_artifact(parts, name="result")
+        await updater.complete()
 
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        # Our tasks last seconds and end in INPUT_REQUIRED or COMPLETED: nothing long-running to stop.
+        await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
 
     # --- The IAM team's own bill (the eval adds it to ours to compare with module 1) ---
     @property
@@ -136,48 +198,53 @@ def _business_result(calls: list) -> dict:
     return result
 
 
-def _error(request: dict, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": code, "message": message}}
+# --- Serving: the SDK builds the routes, Starlette + uvicorn serve them -----------------------------------
+def make_app(service: AccessExecutor, port: int) -> Starlette:
+    card = agent_card(port)
+    handler = DefaultRequestHandler(
+        agent_executor=service, task_store=InMemoryTaskStore(), agent_card=card
+    )
+    routes = [
+        *create_agent_card_routes(agent_card=card),  # GET /.well-known/agent-card.json
+        *create_jsonrpc_routes(handler, RPC_PATH, context_builder=NaiveIdentity()),
+    ]
+    return Starlette(routes=routes)
 
 
-def make_handler(service: AccessA2AService) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # discovery: anyone can read the card (it has no secrets)
-            if self.path == "/.well-known/agent-card.json":
-                self._send(200, agent_card(self.server.server_address[1]))
-            else:
-                self._send(404, {"error": "not found"})
-
-        def do_POST(self):
-            if self.path != "/a2a":
-                return self._send(404, {"error": "not found"})
-            try:
-                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            except json.JSONDecodeError:
-                return self._send(200, _error({}, PARSE_ERROR, "Invalid JSON"))
-            self._send(200, service.handle(request))  # JSON-RPC: errors travel in the body, with HTTP 200
-
-        def _send(self, status: int, body: dict) -> None:
-            data = json.dumps(body, ensure_ascii=False).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("A2A-Version", A2A_VERSION)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-    return Handler
+def make_server(
+    service: AccessExecutor, port: int = 0
+) -> tuple[uvicorn.Server, socket.socket, str]:
+    """port=0 → any free port. We bind the socket OURSELVES and hand it to uvicorn: the card needs the real port
+    before the server starts, and keeping the socket open means no other process can grab it in between."""
+    sock = socket.socket()
+    sock.setsockopt(
+        socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+    )  # restart right after a stop (like uvicorn does)
+    sock.bind(("localhost", port))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(make_app(service, port), log_level="warning")
+    )
+    return server, sock, f"http://localhost:{port}"
 
 
-def start(service: AccessA2AService, port: int = 0, background: bool = True) -> tuple[ThreadingHTTPServer, str]:
-    """Serves the agent (port 0 = any free port). The eval and the tests run it in a background thread."""
-    server = ThreadingHTTPServer(("localhost", port), make_handler(service))
-    if background:
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, f"http://localhost:{server.server_port}"
+def start(service: AccessExecutor, port: int = 0) -> tuple[uvicorn.Server, str]:
+    """Serves the agent in a background thread (eval, tests)."""
+    server, sock, url = make_server(service, port)
+    thread = threading.Thread(
+        target=server.run, kwargs={"sockets": [sock]}, daemon=True
+    )
+    thread.start()
+    while (
+        not server.started and thread.is_alive()
+    ):  # uvicorn starts asynchronously: wait until it listens
+        time.sleep(0.05)
+    if not server.started:
+        raise RuntimeError(f"Access agent failed to start on {url}")
+    return server, url
 
 
 def serve(port: int = PORT) -> None:
-    server, url = start(AccessA2AService(), port, background=False)
-    print(f"Access A2A agent on {url}  (card: /.well-known/agent-card.json)")
-    server.serve_forever()
+    server, sock, url = make_server(AccessExecutor(), port)
+    print(f"Access A2A agent on {url}  (card: {AGENT_CARD_WELL_KNOWN_PATH})")
+    server.run(sockets=[sock])

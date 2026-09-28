@@ -27,7 +27,7 @@ def test_triage_learns_the_remote_agent_from_its_card(client):
     desk = service_desk(ANA, False, client)
     transfer = next(t for t in desk.agents["triage"].tools if t["function"]["name"] == "transfer_to_access")
     # The description the triage LLM reads comes from the IAM team's Agent Card, not from our code.
-    assert desk.agents["access"].client.card["description"] in transfer["function"]["description"]
+    assert desk.agents["access"].client.card.description in transfer["function"]["description"]
 
 
 def test_hub_triage_has_no_domain_tools_and_spokes_only_know_the_hub(client):

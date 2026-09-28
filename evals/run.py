@@ -24,12 +24,12 @@ from src.auth import session_for
 from src.services.access_a2a import data as iam_data
 from src.services.access_a2a.agent import access_agent_for
 from src.services.a2a_client import A2AClient
-from src.services.access_a2a.server import AccessA2AService, start
+from src.services.access_a2a.server import AccessExecutor, start
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
-def run_case(case: Case, access: AccessA2AService, client: A2AClient) -> RunResult:
+def run_case(case: Case, access: AccessExecutor, client: A2AClient) -> RunResult:
     data.reset()      # every run starts from the same data — ours...
     iam_data.reset()  # ...and the IAM team's
     desk = service_desk(session_for(case.user), False, client)  # the case's user is already logged in
@@ -46,7 +46,7 @@ def run_case(case: Case, access: AccessA2AService, client: A2AClient) -> RunResu
     )
 
 
-def run_case_with_retry(case: Case, access: AccessA2AService, client: A2AClient, attempts: int = 3) -> RunResult:
+def run_case_with_retry(case: Case, access: AccessExecutor, client: A2AClient, attempts: int = 3) -> RunResult:
     """A network blip or a 5xx/429 from the API says nothing about the agent: retry the whole run (from clean
     data) instead of crashing the eval. Any other exception still crashes on purpose — that's a bug."""
     for attempt in range(1, attempts + 1):
@@ -70,7 +70,7 @@ def main() -> None:
     cases = [c for c in CASES if not args.case or c.id in args.case]
     rows = []
     # The IAM team's Access agent, served here on a free port — the eval needs nothing else running.
-    access = AccessA2AService(make_agent=lambda session: access_agent_for(session, verbose=False))
+    access = AccessExecutor(make_agent=lambda session: access_agent_for(session, verbose=False))
     _, url = start(access)
     client = A2AClient(url)  # discover once for the whole eval
     print(f"Service Desk (hub + Access via A2A at {url}) | {len(cases)} cases x {args.runs} runs\n")

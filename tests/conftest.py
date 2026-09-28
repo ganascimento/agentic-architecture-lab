@@ -5,7 +5,7 @@ import pytest
 from src.core.agent import ToolCall, Usage
 from src.services.a2a_client import A2AClient
 from src.services.access_a2a.agent import ASK_USER
-from src.services.access_a2a.server import AccessA2AService, start
+from src.services.access_a2a.server import AccessExecutor, start
 
 
 class FakeAccessAgent:
@@ -33,7 +33,7 @@ class FakeAccessAgent:
 
 @pytest.fixture
 def service():
-    return AccessA2AService(make_agent=FakeAccessAgent)
+    return AccessExecutor(make_agent=FakeAccessAgent)
 
 
 @pytest.fixture
@@ -41,4 +41,4 @@ def client(service):
     """A client that already discovered a fake Access agent served over real A2A."""
     server, url = start(service)
     yield A2AClient(url)
-    server.shutdown()
+    server.should_exit = True  # uvicorn's graceful stop

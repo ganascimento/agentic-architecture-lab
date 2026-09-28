@@ -16,10 +16,11 @@ remembers which request — a new task in the same context, not a stranger.
 
 import json
 
+from a2a.types import Task, TaskState
+
 from src.auth import Session
 from src.core.agent import ToolCall, Usage
-from src.services.a2a_client import A2AClient
-from src.services.a2a_protocol import FAILED, FINISHED, data_of, text_of
+from src.services.a2a_client import FINISHED, A2AClient, data_of, state_name, text_of
 
 
 class RemoteAgent:
@@ -32,10 +33,12 @@ class RemoteAgent:
             session,
             verbose,
         )
-        self.task: dict | None = (
+        self.task: Task | None = (
             None  # the open remote task, while it waits for the user (INPUT_REQUIRED)
         )
-        self.context_id: str | None = None  # the remote conversation: outlives each task
+        self.context_id: str | None = (
+            None  # the remote conversation: outlives each task
+        )
         self.tool_calls: list[
             ToolCall
         ] = []  # one entry per A2A exchange: what the eval can observe
@@ -46,29 +49,40 @@ class RemoteAgent:
     @property
     def handles(self) -> str:
         card = self.client.card
-        skills = "; ".join(f"{s['name']}: {s['description']}" for s in card["skills"])
-        return f"{card['description']} Skills — {skills}"
+        skills = "; ".join(f"{s.name}: {s.description}" for s in card.skills)
+        return f"{card.description} Skills — {skills}"
 
     def reply(self, user_text: str) -> tuple[str, bool]:
         """Relays the RAW user text (the remote agent's provenance check needs the user's own words).
         Returns (the remote agent's text, whether its task finished)."""
+        open_task = (
+            self.task.id if self.task else None
+        )  # continue it, if any; else a new task
         task = self.client.send(
             user_text,
             user_email=self.session.email,
-            task_id=self.task and self.task["id"],  # continue the open task, if any; else the server starts one
+            task_id=open_task,
             context_id=self.context_id,
+            on_progress=self._progress,  # streaming: "working" arrives before the answer
         )
-        state = task["status"]["state"]
-        self.task = None if state in FINISHED else task
-        self.context_id = task["contextId"]
-        # The eval sees what the PROTOCOL returns — state + structured data — not the opaque agent's internals.
-        result = json.dumps({"state": state, "data": data_of(task)}, ensure_ascii=False)
+        state, name = task.status.state, state_name(task)
+        finished = state in FINISHED
+        self.task = None if finished else task
+        self.context_id = task.context_id
+        # The eval sees what the PROTOCOL returns — state + structured data — not the
+        # opaque agent's internals.
+        result = json.dumps({"state": name, "data": data_of(task)}, ensure_ascii=False)
+        failed = state == TaskState.TASK_STATE_FAILED
         self.tool_calls.append(
-            ToolCall(f"a2a_{self.name}", {"text": user_text}, result, state == FAILED)
+            ToolCall(f"a2a_{self.name}", {"text": user_text}, result, failed)
         )
         if self.verbose:
-            print(f"  🌐 A2A → {self.client.card['name']}: [{state}]")
-        return text_of(task), state in FINISHED
+            print(f"  🌐 A2A → {self.client.card.name}: [{name}]")
+        return text_of(task), finished
+
+    def _progress(self, text: str) -> None:
+        if self.verbose:
+            print(f"  🌐 {self.client.card.name}: {text}")
 
     def cost(self) -> float:
         return 0.0

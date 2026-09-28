@@ -1,3 +1,6 @@
 openai
 python-dotenv
 pytest
+# Module 2 (A2A). PINNED: both sides of a protocol must agree — v0.3 → v1.0 broke the API.
+a2a-sdk[http-server]==1.1.5
+uvicorn==0.40.0

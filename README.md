@@ -28,7 +28,7 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 |---|---|
 | Language | Python 3.12 |
 | LLM | OpenAI (`openai` SDK, Chat Completions): `gpt-6-luna` |
-| Agent-to-agent | A2A v1.0, JSON-RPC binding, hand-written with the stdlib (`http.server`, `urllib`) |
+| Agent-to-agent | A2A v1.0 on the official SDK (`a2a-sdk` 1.1.5, pinned), JSON-RPC + streaming (SSE), served by uvicorn |
 | Config | `python-dotenv` |
 | Tests | `pytest` |
 
@@ -154,7 +154,7 @@ python -m evals.run                    # all cases, 3 runs each
 python -m evals.run --runs 1 --case 10 31
 ```
 
-Results are saved to `evals/results/`.
+Results are saved to `evals/results/` (git-ignored: regenerated on every run).
 
 ## 📁 Project Structure
 
@@ -167,8 +167,8 @@ src/
 ├── tools/                 # The Service Desk's tools (knowledge, tickets, account) + provenance check
 ├── architectures/         # The hub: triage + specialists, and the remote (A2A) node
 └── services/
-    ├── a2a_protocol.py    # What both sides of A2A share (version, task states, helpers)
-    ├── a2a_client.py      # Minimal A2A client (discovery + SendMessage)
+    ├── a2a_protocol.py    # What both sides agree on beyond the spec (the naive identity header)
+    ├── a2a_client.py      # A2A client on the SDK (discovery + streaming send + GetTask)
     └── access_a2a/        # The IAM team's Access agent as an A2A service (server, agent, tools, data)
 tests/                     # No-LLM tests
 evals/                     # Eval cases, runner and saved results

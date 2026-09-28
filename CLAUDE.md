@@ -58,6 +58,7 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
 - **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (35 casos × 3) só nos marcos.
 - `.env` na raiz com `OPENAI_API_KEY` (nunca commitar; está no `.gitignore`)
 - Módulo 1 sem framework de agentes (de propósito); LangGraph entra no módulo 4
+- Módulo 2: `a2a-sdk[http-server]==1.1.5` + `uvicorn` (versões FIXADAS: os dois lados do protocolo precisam concordar)
 - Demais dependências são decididas no módulo em que aparecem (e registradas aqui)
 - Docker disponível para serviços auxiliares (vector DB, observabilidade etc.)
 
@@ -84,11 +85,13 @@ src/
   architectures/           # service_desk() = HUB: handoff (grafo, triagem-agente) · specialists (Suporte, Conta)
                            # · remote (RemoteAgent: nó do grafo que é agente de outro time via A2A, sem LLM)
   services/                # agentes de OUTROS times como serviços
-    a2a_client.py          # cliente A2A mínimo (descoberta + SendMessage)
-    access_a2a/            # time de IAM: server (A2A à mão) · agent (ACCESS_ROLE) · tools · data (solicitações)
+    a2a_client.py          # cliente A2A no SDK (descoberta + envio com streaming + GetTask), fachada síncrona
+    a2a_protocol.py        # o que os 2 lados combinam FORA da spec: header de identidade (ingênuo até a 2.5)
+    access_a2a/            # time de IAM: server (SDK: AccessExecutor + NaiveIdentity) · agent (ACCESS_ROLE +
+                           # ask_user) · tools · data (solicitações)
 tests/                     # sem LLM: tools, auth, a2a, architectures (serviço A2A falso em conftest.py)
 evals/                     # cases.py (35 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe o
-                           # serviço; custo/chamadas = nosso + remoto), results/ (v1/ = dataset antigo)
+                           # serviço; custo/chamadas = nosso + remoto), results/ (fora do git: gerado a cada run)
 ```
 
 ## Organização por módulo
@@ -114,7 +117,7 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     delegado) + justificativa repassada perde proveniência (fronteira de confiança). Modos: síncrono, streaming (padrão
     em chat), polling, webhook (tarefa longa, com polling de reconciliação). Recomendado: task de acesso termina rápido
     (`pending_approval`); aprovação é outro fluxo (módulo 4).
-  - [x] 2.2 A2A mínimo à mão (stdlib): `src/services/access_a2a/` (Agent Card + JSON-RPC `SendMessage`, síncrono,
+  - [x] 2.2 A2A mínimo à mão (stdlib; substituído pelo SDK na 2.3, está no git em `f56b556`): `src/services/access_a2a/` (Agent Card + JSON-RPC `SendMessage`, síncrono,
     INPUT_REQUIRED → COMPLETED com o mesmo taskId; estado decidido pelo CÓDIGO) + `src/services/a2a_client.py`
     (descoberta + envio, `show_wire`). ⚠️ identidade ingênua proposital (`metadata.userEmail`), teste
     `test_naive_identity_is_forgeable` documenta — corrigir na 2.5. Perguntas de fixação da 2.2 em aberto.
@@ -139,8 +142,19 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     Efeito colateral medido: tool de perguntar barata → modelo pergunta demais (caso 10 caiu p/ 0/3) → prompt diz
     quando NÃO perguntar e "não julgue o mérito, o gestor decide" (D2). Eval acesso/multi/segurança 3 runs: 97%
     (18 = 2/3, ainda pergunta às vezes). Full 1 run: 31/35 (2, 11 = ping-pong Suporte↔triagem conhecido; 15).
-    Pendente: TTL das conversas no servidor e keep-alive HTTP (2.3, SDK tem TaskStore).
-  - [ ] Perguntas de fixação da 2.2 em aberto. Depois: 2.3 (SDK oficial).
+  - [x] 2.3 SDK oficial (`a2a-sdk[http-server]==1.1.5` + `uvicorn`, FIXADOS no requirements). Trocou tudo (a versão à mão
+    fica no git). SDK assume: JSON-RPC, TaskStore (escopado por dono → IDOR de taskId resolvido pelo SDK), tipos
+    protobuf, streaming SSE, GetTask/Cancel, erros tipados. Continua NOSSO: decisão do estado (`AccessExecutor`),
+    memória por (usuário, contextId) (IDOR de contexto impossível por construção), identidade (`NaiveIdentity` =
+    `ServerCallContextBuilder` lendo header — a costura da 2.5). Ponte sync↔async: `asyncio.to_thread` (servidor),
+    `asyncio.run` por chamada (cliente; sem keep-alive). Streaming p/ progresso + GetTask no fim (task consolidada).
+    Provado: payload à mão da 2.2 funciona no servidor oficial (interop); `message/send` (v0.3) → -32601 (quebra de
+    versão; `enable_v0_3_compat` resolveria). Eval acesso/multi/segurança 3 runs: 100%, custo/latência iguais.
+    Fixação respondida: 1 ok; 2 metade (prova interop só no que foi exercitado); 3 recurso certo = compat v0.3 no card.
+    Pendente: TTL das conversas — expirar JUNTOS `agents` e o `InMemoryTaskStore` (política nossa, nada expira sozinho).
+    **Para a 2.5 (achado do /simplify):** identidade via Starlette `AuthenticationMiddleware` + `AuthenticationBackend`
+    (401 antes do JSON-RPC; hoje usuário desconhecido chega ao `execute` e vira `InvalidParamsError`) — no backend
+    entra a verificação do token assinado; some `EmailUser`/`NaiveIdentity`.
 - [x] **Módulo 1 — Multi-Agent Architecture** (fechado pelo aluno em 2026-09-27)
   - 1.1 teoria · 1.2 single-agent · 1.3 eval + routing · 1.4 handoff (malha e hub) + auth + tools novas · 1.5 SUMMARY.
   - Resultados-chave (eval v2): single ~90% e o mais barato; routing melhor em vários pedidos/ambíguos (+~20% custo);

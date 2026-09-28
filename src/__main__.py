@@ -6,7 +6,8 @@ Test accounts are in src/data.py (e.g. ana / ana123).
 """
 
 import getpass
-import urllib.error
+
+from a2a.client import AgentCardResolutionError
 
 from src import data
 from src.architectures import service_desk
@@ -24,7 +25,7 @@ def main() -> None:
 
     try:
         desk = service_desk(session)
-    except urllib.error.URLError:
+    except AgentCardResolutionError:  # discovery failed: the card is unreachable
         print(f"\nThe Access agent is not reachable at {ACCESS_AGENT_URL}. Start it: python -m src.services.access_a2a")
         return
     print(f"\nService Desk — logged in as {session.name} <{session.email}>")
