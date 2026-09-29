@@ -157,6 +157,14 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     eval sobe o serviço e checa pelo artifact). Eval COMPLETO (35×3, com o token da 2.5): **91% (96/105)**, 4,9 chamadas,
     US$ 0,0005/caso, 8,3 s. Falhas: 1/2/11/32 = ping-pong Suporte↔triagem (conhecido, a tratar); 15 = trivia (0/3,
     conhecido); 18 = 1/3 (o Acessos ainda julga o mérito de "colega de férias" às vezes).
+  - [x] **Ping-pong Suporte↔triagem corrigido (causa raiz, 2 padrões):** (1) a triagem escrevia a nota como ROTA
+    ("encaminhar para suporte de impressoras") e o Suporte não se via como destinatário → devolvia (5/8 rodadas).
+    Fix: `HANDOFF_NOTE` = moldura escrita pelo CÓDIGO ("o X transferiu para VOCÊ, Y: é seu. O usuário precisa: ...")
+    + campo `reason` pede a NECESSIDADE, não quem atende. (2) depois de resolver, devolvia o MESMO assunto ("identificar
+    a impressora") → descrição do `transfer_to_triage` diz quando NÃO usar. Efeito colateral medido: caso 11 (2 pedidos
+    do Suporte) caiu p/ 0/3 → nota = "por onde começar, não o limite" + triagem lista TODOS os pedidos do agente.
+    Sem bloqueio no código (devolução legítima existe quando a triagem erra). Eval final 35×3: **93% (98/105)**,
+    4,7 chamadas, 6,1 s/caso (antes 91%, 4,9, 8,3 s). Restam: 15 (trivia, 0/3) e variância 2/3 em 10/11/18/19.
   - [x] 2.5 identidade entre serviços: header ingênuo → **JWT assinado (Ed25519)** emitido pelo Service Desk
     (`src/identity.py`): assinatura = QUEM chama (iss), claims = EM NOME DE QUEM (sub), aud = URL do agente (sem
     replay em outro serviço), exp 60s (token por chamada). Assimétrico: IAM só VERIFICA (chave pública), não emite.

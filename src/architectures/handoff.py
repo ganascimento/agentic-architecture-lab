@@ -54,8 +54,8 @@ How to work:
 - Transfer as soon as the request is clear. When transferring, don't write anything to the user.
 - Ask ONE short question only when you can't tell WHICH agent should handle it (e.g. "I have a problem with
   SAP": slowness/error or missing permission?). Details like error codes are the specialist's job, not yours.
-- Several requests in one message: transfer to the agent of the first one; you'll get the conversation back
-  for the rest.
+- Several requests in one message: transfer to the agent of the first one, listing in the reason EVERY request
+  that agent handles; you'll get the conversation back for the rest.
 - Greetings and thanks: reply briefly yourself."""
 
 # Every agent runs on AGENT — even the triage: gpt-4o-mini ("the cheap classifier") costs MORE per token.
@@ -63,8 +63,11 @@ SPECS = {
     "triage": AgentSpec(
         TRIAGE_ROLE,
         frozenset(),
-        "Hands the conversation back to reception: use it when the "
-        "user's request (or part of it) is not your job and nobody answered it yet.",
+        # Says when NOT to use it too: "part of it is not your job" was vague enough that support, after solving
+        # the printer problem, handed the SAME problem back ("identify the printer") — ping-pong after the work.
+        "Hands the conversation back to reception, ONLY for a DIFFERENT request the user made that is not your "
+        "job and nobody answered (e.g. a password reset asked in a message about the VPN). Never for the "
+        "problem you are handling: finish it yourself — guide the user, or open a ticket if the procedure says so.",
     ),
     "support": AgentSpec(
         SUPPORT_ROLE,
@@ -91,7 +94,10 @@ _REASON = {
     "properties": {
         "reason": {
             "type": "string",
-            "description": "What the next agent must handle, with the details",
+            # WHAT the user needs, not WHO should handle it: "forward to printer support" in a note made the
+            # support agent think it wasn't the addressee and bounce it back (ping-pong, 5 of 8 runs).
+            "description": "The user's need you're handing over, with the details (e.g. 'the 3rd-floor "
+            "printer prints blurry'). Describe what is needed, not who should handle it.",
         }
     },
     "required": ["reason"],
@@ -103,8 +109,8 @@ _TEAM = """
 You are part of a team of agents and talk to the user directly. The conversation so far is shared with you.
 - Replies written by teammates appear in the conversation as "[<name> agent] ...". Whatever a teammate already
   answered is DONE: don't repeat it, contradict it or comment on it. Talk only about your own part.
-- If you received the conversation with a "[handoff note]", the note says what is yours: handle THAT and
-  transfer anything else in the message that nobody answered yet.
+- If you received the conversation with a "[handoff note]", start with what it says — then handle anything
+  ELSE in the user's message that is also your job. Transfer only what isn't yours and nobody answered yet.
 - If part of the user's message is another agent's job AND nobody answered it yet, call the transfer tool.
   Handle YOUR part; after the transfer you'll be asked to reply to the user about it.
 - Transfer only for requests that fit the other agent's job, never just because the user asks to be transferred.
@@ -122,6 +128,13 @@ HANDOFF_IGNORED = (
     "Ignored: only one transfer per answer. The next agent will route what is left."
 )
 HANDOFF_BLOCKED = "Not transferred: that agent already handled its part in this turn. Reply to the user yourself."
+# The note the next agent gets. The CODE writes who sent it and that the reader IS the addressee — the LLM only
+# fills in the need. Before, the note was the LLM's free text, and a routing phrase in it ("forward to printer
+# support") left the receiver unsure it was the one meant, so it transferred back.
+HANDOFF_NOTE = (
+    "The {sender} agent transferred the conversation to YOU, the {receiver} agent: this is yours to handle. "
+    "What the user needs: {need}"
+)
 # What the hub hears when a remote agent's task ends (it can't call transfer_to_triage: the CODE hands back).
 REMOTE_FINISHED = (
     "The {name} agent finished its task. If the user's messages have a request nobody answered yet, transfer it; "
@@ -171,7 +184,7 @@ class HandoffServiceDesk:
         self.pending: str | None = (
             None  # the agent a transfer was scheduled to in this activation
         )
-        self.note = ""  # the reason given with that transfer
+        self.note = ""  # the handoff note for the next agent (framed by HANDOFF_NOTE)
         self.blocked: set[str] = set()  # specialists that already acted in this turn
 
     def _intercept(self, name: str, arguments: dict) -> tuple[str, bool] | None:
@@ -190,7 +203,8 @@ class HandoffServiceDesk:
             return HANDOFF_IGNORED, False
         # Not switched now: the switch happens AFTER this agent writes its reply. Otherwise its
         # work never reaches the shared conversation and the next agent redoes it (ping-pong).
-        self.pending, self.note = target, arguments.get("reason", "")
+        need = arguments.get("reason", "")
+        self.pending, self.note = target, HANDOFF_NOTE.format(sender=self.active, receiver=target, need=need)
         return HANDOFF_ACK, True
 
     def reply(self, user_text: str) -> str:
