@@ -17,6 +17,18 @@
   - [Código vs prompt](#código-vs-prompt)
   - [Resultado do módulo](#resultado-do-módulo)
   - [Decisões do projeto](#decisões-do-projeto)
+- [Módulo 2: A2A (Agent2Agent)](#módulo-2-a2a-agent2agent)
+  - [O que é A2A](#o-que-é-a2a)
+  - [Agent Card](#agent-card)
+  - [Skill não é tool](#skill-não-é-tool)
+  - [Tasks, estados e modos](#tasks-estados-e-modos)
+  - [À mão vs SDK](#à-mão-vs-sdk)
+  - [Handoff sobre A2A](#handoff-sobre-a2a)
+  - [Identidade entre serviços](#identidade-entre-serviços)
+  - [Muitos agentes e outros times](#muitos-agentes-e-outros-times)
+  - [Prompt, tools e eval (lições do módulo)](#prompt-tools-e-eval-lições-do-módulo)
+  - [Resultado do módulo 2](#resultado-do-módulo-2)
+  - [Decisões do módulo 2](#decisões-do-módulo-2)
 
 ---
 
@@ -138,3 +150,84 @@
 - **D6:** contexto entre agentes = mensagem/conversa original, assinada por autor. Nada de resumo como única fonte.
 - **D7:** topologia: single por padrão; routing para vários pedidos ou pedidos ambíguos; handoff **hub** para escalar a muitos agentes; malha só com poucos agentes.
 - **D8:** anti-ping-pong no código: não voltar a quem já atuou no turno, uma transferência por resposta, limite de handoffs.
+
+---
+
+## Módulo 2: A2A (Agent2Agent)
+
+### O que é A2A
+- Protocolo para um agente **delegar uma tarefa a outro agente**, geralmente de outro time ou serviço. Na prática é agent-as-tool pela rede.
+- É **transporte**, não topologia. Dá para usar A2A dentro de um hub, de um supervisor ou de um pipeline.
+- **A2A × MCP:** só use A2A se do outro lado existe um **agente** (com critério próprio). Se é uma função (buscar na KB), use tool/MCP.
+- Spec **v1.0**: métodos `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`...; estados `TASK_STATE_*`. Tutoriais antigos usam a v0.3 (`message/send`) e não funcionam mais.
+
+### Agent Card
+- JSON público em `/.well-known/agent-card.json`: **quem** é o agente, **onde** chamá-lo (URL + protocolo + versão), **o que** sabe fazer (skills), **recursos** (streaming, push) e **como** se autenticar (`security_schemes`).
+- **Descoberta:** o cliente só conhece a URL base; o endereço das mensagens vem do card. Se o outro time mudar a rota, você não muda código.
+- O card **não** diz: as tools internas, **quem** é aceito (isso é a lista de confiança do servidor) nem o formato do dado de negócio devolvido (lacuna de contrato → schema/extensão versionada, módulo 5).
+- O card é uma **vitrine curada**: você publica o que escolhe, não tudo o que o agente faz.
+
+### Skill não é tool
+- **Skill** = capacidade de alto nível, escrita para **quem chama** decidir se deve chamar. **Tool** = função interna, opaca.
+- Ninguém "chama uma skill": manda-se uma **mensagem em linguagem natural**, e o agente remoto escolhe as tools.
+- Não há correspondência 1 para 1: uma skill usa várias tools; o time pode trocar as tools sem mudar o card.
+- Escreva a skill na **língua do usuário**, com `examples` (é o que mais ajuda o LLM de quem chama). "Gerenciar solicitações de acesso" > "CRUD de solicitações".
+- Helper interno (`buscar_gerente`) e controle (`ask_user`) **não** viram skill. Divida uma skill só quando a diferença importa para quem chama: permissão, prazo, público.
+- No A2A você delega um **objetivo**; no MCP o **seu** LLM chama uma função com argumentos exatos.
+
+### Tasks, estados e modos
+- **Task** = uma unidade de trabalho (termina). **Context** = a conversa (continua). Mantenha o `contextId` entre tasks para o agente remoto lembrar da conversa.
+- `INPUT_REQUIRED`: o remoto precisa de algo do usuário; a próxima mensagem vai para **a mesma task**.
+- **O estado é contrato entre máquinas:** decida por **sinal explícito** (tool de controle `ask_user`), nunca por heurística ("não chamou tool = está perguntando" prendia a conversa quando o agente só recusava).
+- Default que **falha para o lado seguro**: na dúvida, `COMPLETED` (pior caso: um salto a mais), nunca `INPUT_REQUIRED` (pior caso: usuário preso).
+- Modos de entrega: **síncrono**, **streaming** (SSE, padrão em chat: mostra progresso), **polling** (`GetTask`), **webhook** (tarefa de horas; com polling de reconciliação).
+- Task de acesso deve terminar rápido (`pending_approval`); a aprovação humana é **outro fluxo** (módulo 4).
+
+### À mão vs SDK
+- À mão (stdlib) serve para **ver o que passa na rede**; o SDK serve para **interoperar** com outros times.
+- O SDK assume o **transporte**: JSON-RPC, erros tipados, `TaskStore` (separado por dono), streaming, `GetTask`/`Cancel`, tipos validados.
+- Continua **nosso** a **semântica**: decisão do estado (`AgentExecutor.execute`), memória do agente por conversa, identidade. Nenhum SDK decide o contrato de negócio — o bug do estado teria acontecido igual com ele.
+- **Interop provada:** o payload escrito à mão funcionou no servidor oficial. Prova só o que foi exercitado.
+- Versões quebram (v0.3 → v1.0): **fixe a versão** dos dois lados; o card pode anunciar várias versões e o servidor manter compatibilidade (`enable_v0_3_compat`).
+- Ponte síncrono↔assíncrono: `asyncio.to_thread` no servidor (senão um LLM travando congela o serviço — e até o streaming chega atrasado); `asyncio.run` no cliente.
+- Mecanismo × política: o código genérico chama uma função sua (`on_progress`, `CredentialService`, `intercept`); quem usa decide o que fazer.
+
+### Handoff sobre A2A
+- O agente remoto vira um **nó do hub** (`RemoteAgent`, sem LLM do nosso lado). A triagem aprende o que ele faz **pelo card**.
+- O remoto não sabe transferir: quando a task termina, **o código** devolve a conversa ao hub **no mesmo turno**.
+- Agente opaco: o eval só enxerga o que o protocolo devolve (estado + dado estruturado). Artifact com **texto para o humano e dado para a máquina**.
+- Least privilege pela arquitetura: tools e dados de acesso só existem dentro do serviço de IAM.
+
+### Identidade entre serviços
+- Duas perguntas: **quem está chamando?** (o serviço) e **em nome de quem?** (o usuário). Identidade no payload ou num header que qualquer um escreve = falsificável.
+- Solução: **JWT assinado** (Ed25519) pelo Service Desk: assinatura = quem chama (`iss`); `sub` = usuário da sessão; `aud` = URL do agente (sem replay em outro serviço); `exp` curto (token por chamada).
+- **Assimétrico > segredo compartilhado:** com HMAC quem verifica também emite; com par de chaves, verificar e assinar são poderes separados.
+- O card declara o esquema (Bearer JWT); o `AuthInterceptor` do SDK põe o header; o servidor verifica **antes do protocolo** (middleware → 401): algoritmo fixo, emissor na **lista de confiança do servidor**, `aud`, `exp`, usuário conhecido.
+- IDOR: `taskId` de outro usuário → o `TaskStore` do SDK (escopado por dono) resolve; `contextId` → chave `(usuário, contexto)`, impossível por construção.
+- ⚠️ Fronteira que resta: o servidor crê em qualquer `sub` que o Service Desk assina. Correção real: **IdP + token exchange** (RFC 8693) a partir do token do próprio usuário. Em produção também: TLS, `jti` anti-replay, chave em cofre + JWKS para rotação.
+
+### Muitos agentes e outros times
+- O A2A expõe um agente **na fronteira**, não a organização interna. Um time com 50 tools e hub interno publica uma **fachada** com poucas skills de negócio; o hub deles fica atrás do executor.
+- Vários agentes A2A só com **fronteira real** (dono, segurança ou escala diferentes). Senão, quem chama passa a conhecer o organograma do outro (acoplamento, Lei de Conway).
+- Pergunta que decide: **quem deve saber rotear isso?** Quem conhece o domínio roteia.
+- Muitas skills recriam o problema das muitas tools: granularidade de negócio, **Extended Agent Card** (lista completa só para autenticados), catálogo/descoberta (módulo 5).
+- Mesmo time ≠ mesma arquitetura: separe por **contexto delimitado** (usuários, permissões, ciclo de vida, vocabulário). Um triage por contexto; A2A entre contextos. E não separe demais: cada agente custa operação, eval e tracing.
+
+### Prompt, tools e eval (lições do módulo)
+- **Toda tool disponível tende a ser usada.** `ask_user` fez o agente perguntar demais; `transfer_to_triage` fez devolver demais. A descrição precisa dizer **quando NÃO usar**.
+- **Estrutura quem escreve é o código; o LLM só preenche o conteúdo.** A nota de handoff em texto livre ("encaminhar para suporte de impressoras") fez o destinatário não se reconhecer → ping-pong. Com a moldura do código ("transferido para VOCÊ"), sumiu.
+- O agente não deve julgar o **mérito** de uma justificativa: isso é do gestor (D2).
+- Eval de subconjunto confirma a correção; só o **eval completo** pega a regressão em outro lugar (caso 11).
+
+### Resultado do módulo 2
+- Hub + Acessos via A2A (com token assinado), 35 casos × 3: **93%**, 4,7 chamadas por caso (nossas + remotas), 6,1 s.
+- Antes da correção do ping-pong: 91%, 4,9 chamadas, 8,3 s.
+- Falhas restantes: trivia (caso 15, módulo 6) e variância 2/3 em poucos casos.
+- A rede e o protocolo não pioraram a qualidade; o que mais pesou foi prompt e contrato entre agentes.
+
+### Decisões do módulo 2
+- **D9:** estado de protocolo por **sinal explícito** (tool de controle), com default que falha para o lado seguro.
+- **D10:** identidade entre serviços = **token assinado** (quem chama + em nome de quem, `aud`, `exp` curto), verificado antes do protocolo. Nunca identidade no payload.
+- **D11:** A2A para **agente** de outro contexto ou time, via **fachada** com skills de negócio; tool/MCP para função. Separar por contexto delimitado, não por time.
+- **D12:** a **estrutura** das mensagens entre agentes (quem transferiu, para quem) é escrita pelo código; o LLM só preenche o conteúdo.
+

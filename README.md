@@ -17,7 +17,7 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 
 - 🧠 **Framework-free agent loop**: the model calls tools in a plain Python loop you can read end to end.
 - 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account), who talk to the user directly.
-- 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC.
+- 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC with streaming progress (official `a2a-sdk`).
 - 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access. Between services, a short-lived signed token (JWT) says who calls and on whose behalf.
 - 🧾 **Provenance checks**: the code verifies that an access justification came from the user's own words.
 - 💰 **Evals with numbers**: pass rate, model calls, cost and latency per case.
@@ -29,6 +29,7 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 | Language | Python 3.12 |
 | LLM | OpenAI (`openai` SDK, Chat Completions): `gpt-6-luna` |
 | Agent-to-agent | A2A v1.0 on the official SDK (`a2a-sdk` 1.1.5, pinned), JSON-RPC + streaming (SSE), served by uvicorn |
+| Service identity | Signed JWT (`pyjwt`, Ed25519): who calls and on whose behalf |
 | Config | `python-dotenv` |
 | Tests | `pytest` |
 
@@ -40,8 +41,8 @@ kept in its own branch (`module-N`) and tag (`module-N-final`).
 | # | Module | Status |
 |---|---|---|
 | 1 | Multi-Agent Architecture: single agent, routing, handoff (mesh and hub) | ✅ done — branch `module-1` |
-| 2 | A2A (Agent2Agent protocol) | 🚧 in progress |
-| 3 | MCP (Model Context Protocol) | ⏳ |
+| 2 | A2A (Agent2Agent protocol): remote agent, official SDK, streaming, signed service identity | ✅ done — branch `module-2` |
+| 3 | MCP (Model Context Protocol) | 🚧 next |
 | 4 | Advanced LangGraph: checkpoints, human-in-the-loop | ⏳ |
 | 5 | Agent Builder + Registry | ⏳ |
 | 6 | Security & Governance | ⏳ |
@@ -86,7 +87,7 @@ Every new terminal needs the virtual environment active first: `source .venv/bin
 |---|---|
 | `python -m src.services.access_a2a` | Starts the **Access agent** (the IAM team's A2A service) on port 8001 |
 | `python -m src` | Starts the **Service Desk** chat (needs the Access agent running) |
-| `python -m src.services.a2a_client` | A2A demo: discovers the Access agent and talks to it, printing the raw JSON on the wire |
+| `python -m src.services.a2a_client` | A2A demo: discovers the Access agent and runs a two-step task, showing streaming progress |
 | `python -m pytest -q` | Runs the tests (no LLM calls, no cost) |
 | `python -m evals.run` | Runs the eval (starts the Access agent by itself; calls the LLM) |
 
@@ -123,7 +124,7 @@ the VPN has been down since yesterday and I need access to SAP to post invoices
 I forgot my password
 ```
 
-### Seeing A2A on the wire
+### Seeing A2A in action
 
 With the Access agent running, the demo client shows discovery and a two-step task (`INPUT_REQUIRED` → `COMPLETED`):
 
@@ -132,14 +133,20 @@ python -m src.services.a2a_client
 ```
 
 ```
-──► GET  /.well-known/agent-card.json        ◄── the Agent Card (skills, where to call)
-──► POST /a2a  {"method": "SendMessage", …}   ◄── task: TASK_STATE_INPUT_REQUIRED ("what's the justification?")
-──► POST /a2a  {… "taskId": …}                ◄── task: TASK_STATE_COMPLETED + artifact (REQ0002)
+Discovered: Access Request Agent — skills: ['access-request', 'access-status']
+  … Checking your request...                       ← streaming: WORKING arrives before the answer
+[TASK_STATE_INPUT_REQUIRED] What is the justification for SAP access?
+  … Checking your request...
+[TASK_STATE_COMPLETED] Access request REQ0002 registered, pending your manager's approval.
 ```
+
+Under the hood: `GET /.well-known/agent-card.json` (discovery) → `POST /a2a` `SendStreamingMessage` with an
+`Authorization: Bearer <signed JWT>` header → `GetTask` for the final task. A call without a valid token gets
+HTTP 401 before it reaches the agent.
 
 ## 🧪 Testing
 
-No test calls the LLM: the tools are deterministic, and the A2A tests serve a fake Access agent over real HTTP.
+No test calls the LLM: the tools are deterministic, and the A2A tests serve a fake Access agent over real HTTP, including forged, expired and wrong-audience tokens.
 
 ```bash
 python -m pytest -q
@@ -154,7 +161,7 @@ python -m evals.run                    # all cases, 3 runs each
 python -m evals.run --runs 1 --case 10 31
 ```
 
-Results are saved to `evals/results/` (git-ignored: regenerated on every run).
+Results are saved to `evals/results/` (git-ignored: regenerated on every run). Latest full run (35 cases × 3): **93%**, 4.7 model calls and 6.1 s per case.
 
 ## 📁 Project Structure
 
