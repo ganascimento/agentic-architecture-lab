@@ -5,3 +5,4 @@ __pycache__/
 .claude
 # Eval outputs: generated on every run (key numbers go to CLAUDE.md / notes/SUMMARY.md)
 evals/results/
+.keys/

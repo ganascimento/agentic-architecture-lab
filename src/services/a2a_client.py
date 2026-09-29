@@ -18,42 +18,105 @@ import asyncio
 from collections.abc import Callable
 
 import httpx
-from a2a.client import A2ACardResolver, ClientCallContext, ClientConfig, ClientFactory
-from a2a.helpers import get_artifact_text, get_data_parts, get_message_text, new_text_message
-from a2a.types import AgentCard, GetTaskRequest, Role, SendMessageRequest, Task, TaskState
+from a2a.client import (
+    A2ACardResolver,
+    AuthInterceptor,
+    ClientCallContext,
+    ClientConfig,
+    ClientFactory,
+    CredentialService,
+)
+from a2a.helpers import (
+    get_artifact_text,
+    get_data_parts,
+    get_message_text,
+    new_text_message,
+)
+from a2a.types import (
+    AgentCard,
+    GetTaskRequest,
+    Role,
+    SendMessageRequest,
+    Task,
+    TaskState,
+)
 
-from src.services.a2a_protocol import USER_HEADER
+from src.identity import delegated_token
 
-DISCOVERY_TIMEOUT, SEND_TIMEOUT = 5, 600  # finding the card should be fast; the remote LLM may not be (10 min)
+DISCOVERY_TIMEOUT, SEND_TIMEOUT = (
+    5,
+    600,
+)  # finding the card should be fast; the remote LLM may not be (10 min)
 # Mirrors the SDK's TERMINAL_TASK_STATES — which lives in its SERVER internals (a client shouldn't import those).
-FINISHED = {TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED,
-            TaskState.TASK_STATE_REJECTED}
+FINISHED = {
+    TaskState.TASK_STATE_COMPLETED,
+    TaskState.TASK_STATE_FAILED,
+    TaskState.TASK_STATE_CANCELED,
+    TaskState.TASK_STATE_REJECTED,
+}
 
-OnProgress = Callable[[str], None]  # receives the agent's status text ("Checking your request...")
+OnProgress = Callable[
+    [str], None
+]  # receives the agent's status text ("Checking your request...")
+
+
+class DelegatedCredentials(CredentialService):
+    """The SDK's hook for credentials: AuthInterceptor asks us for one on every call, then puts it where the
+    card's security scheme says (here: "Authorization: Bearer ..."). We mint a FRESH short-lived token per call,
+    for the user in this call's context and addressed to this agent only (aud = its URL, from its card)."""
+
+    def __init__(self, audience: str):
+        self.audience = audience
+
+    async def get_credentials(
+        self, security_scheme_name: str, context: ClientCallContext | None
+    ) -> str | None:
+        return (
+            delegated_token(context.state["user_email"], self.audience)
+            if context
+            else None
+        )
 
 
 class A2AClient:
     def __init__(self, base_url: str):
         self.card: AgentCard = asyncio.run(self._discover(base_url))
+        self.credentials = DelegatedCredentials(
+            audience=self.card.supported_interfaces[0].url
+        )
 
     @staticmethod
     async def _discover(base_url: str) -> AgentCard:
         async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT) as http:
-            return await A2ACardResolver(http, base_url).get_agent_card()  # where to call comes from the card
+            return await A2ACardResolver(
+                http, base_url
+            ).get_agent_card()  # where to call comes from the card
 
-    def send(self, text: str, user_email: str, task_id: str | None = None, context_id: str | None = None,
-             on_progress: OnProgress | None = None) -> Task:
+    def send(
+        self,
+        text: str,
+        user_email: str,
+        task_id: str | None = None,
+        context_id: str | None = None,
+        on_progress: OnProgress | None = None,
+    ) -> Task:
         """Sends a message; returns the Task once it's COMPLETED or INPUT_REQUIRED (streaming in between)."""
         # task_id: continuing an interrupted task (it asked us something); context_id: the conversation, across tasks
-        message = new_text_message(text, context_id=context_id, task_id=task_id, role=Role.ROLE_USER)
-        # ⚠️ Naive identity (see server.py NaiveIdentity): replaced by a signed token in lesson 2.5.
-        call = ClientCallContext(service_parameters={USER_HEADER: user_email})
+        message = new_text_message(
+            text, context_id=context_id, task_id=task_id, role=Role.ROLE_USER
+        )
+        # WHO the call is on behalf of travels in the context; the token itself is made by DelegatedCredentials.
+        call = ClientCallContext(state={"user_email": user_email})
 
         async def run() -> Task:
             async with httpx.AsyncClient(timeout=SEND_TIMEOUT) as http:
-                client = ClientFactory(ClientConfig(httpx_client=http)).create(self.card)
+                client = ClientFactory(ClientConfig(httpx_client=http)).create(
+                    self.card, interceptors=[AuthInterceptor(self.credentials)]
+                )
                 seen_task_id = task_id
-                async for event in client.send_message(SendMessageRequest(message=message), context=call):
+                async for event in client.send_message(
+                    SendMessageRequest(message=message), context=call
+                ):
                     kind = event.WhichOneof("payload")
                     if kind == "task":
                         seen_task_id = event.task.id
@@ -63,13 +126,17 @@ class A2AClient:
                         if status.state == TaskState.TASK_STATE_WORKING and on_progress:
                             on_progress(get_message_text(status.message, " "))
                 # history_length=0: we read status and artifacts, not the (growing) message history
-                return await client.get_task(GetTaskRequest(id=seen_task_id, history_length=0), context=call)
+                return await client.get_task(
+                    GetTaskRequest(id=seen_task_id, history_length=0), context=call
+                )
 
         return asyncio.run(run())
 
 
 def state_name(task: Task) -> str:
-    return TaskState.Name(task.status.state)  # "TASK_STATE_COMPLETED" — the spec's name, for logs and the eval
+    return TaskState.Name(
+        task.status.state
+    )  # "TASK_STATE_COMPLETED" — the spec's name, for logs and the eval
 
 
 def text_of(task: Task) -> str:
@@ -81,16 +148,32 @@ def text_of(task: Task) -> str:
 
 def data_of(task: Task) -> dict:
     """The structured part of the artifacts — for machines (the caller doesn't parse prose to know what happened)."""
-    return {k: v for a in task.artifacts for d in get_data_parts(a.parts) for k, v in d.items()}
+    return {
+        k: v
+        for a in task.artifacts
+        for d in get_data_parts(a.parts)
+        for k, v in d.items()
+    }
 
 
 if __name__ == "__main__":
     client = A2AClient("http://localhost:8001")
-    print(f"Discovered: {client.card.name} — skills: {[s.id for s in client.card.skills]}")
-    progress = lambda text: print(f"  … {text}")  # noqa: E731
-    task = client.send("preciso de acesso ao SAP", user_email="joao@company.com", on_progress=progress)
+    print(
+        f"Discovered: {client.card.name} — skills: {[s.id for s in client.card.skills]}"
+    )
+    progress = lambda text: print(f"  … {text}")
+    task = client.send(
+        "preciso de acesso ao SAP", user_email="joao@company.com", on_progress=progress
+    )
     print(f"[{state_name(task)}] {text_of(task)}")
-    if task.status.state == TaskState.TASK_STATE_INPUT_REQUIRED:  # the remote agent asked; WE ask the user
-        task = client.send("é para lançar as notas fiscais do mês", user_email="joao@company.com",
-                           task_id=task.id, context_id=task.context_id, on_progress=progress)
+    if (
+        task.status.state == TaskState.TASK_STATE_INPUT_REQUIRED
+    ):  # the remote agent asked; WE ask the user
+        task = client.send(
+            "é para lançar as notas fiscais do mês",
+            user_email="joao@company.com",
+            task_id=task.id,
+            context_id=task.context_id,
+            on_progress=progress,
+        )
         print(f"[{state_name(task)}] {text_of(task)}")

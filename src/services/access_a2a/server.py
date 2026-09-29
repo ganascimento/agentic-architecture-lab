@@ -9,7 +9,7 @@ streaming (SSE), GetTask, CancelTask and push notifications.
 What is STILL OURS, because no SDK knows our business:
 - the task STATE decision (ask_user → INPUT_REQUIRED, anything else → COMPLETED), in `AccessExecutor.execute`;
 - the agent's memory per conversation (the SDK stores tasks, not our LLM's history);
-- who the user is (the SDK asks us through a ServerCallContextBuilder — see NaiveIdentity).
+- who is calling and on whose behalf (lesson 2.5): a signed token, verified in auth.py BEFORE the SDK runs.
 
 Run:  python -m src.services.access_a2a        (port 8001)
 """
@@ -22,36 +22,36 @@ import time
 from collections.abc import Callable
 
 import uvicorn
-from a2a.auth.user import User
 from a2a.helpers import new_data_part, new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.routes import (
-    DefaultServerCallContextBuilder,
-    create_agent_card_routes,
-    create_jsonrpc_routes,
-)
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentInterface,
     AgentSkill,
-    InvalidParamsError,
+    HTTPAuthSecurityScheme,
+    SecurityRequirement,
+    SecurityScheme,
+    StringList,
 )
 from a2a.utils import AGENT_CARD_WELL_KNOWN_PATH
 from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
 from starlette.applications import Starlette
-from starlette.requests import Request
+from starlette.middleware import Middleware
+from starlette.middleware.authentication import AuthenticationMiddleware
 
 from src.auth import Session, session_for
 from src.core.agent import Agent, Usage, total_usage
-from src.services.a2a_protocol import USER_HEADER
 from src.services.access_a2a.agent import ASK_USER, access_agent_for
+from src.services.access_a2a.auth import DelegatedTokenBackend, unauthorized
 
 PORT = 8001
 RPC_PATH = "/a2a"
+AUTH_SCHEME = "delegatedToken"
 
 
 def agent_card(port: int) -> AgentCard:
@@ -70,6 +70,18 @@ def agent_card(port: int) -> AgentCard:
         ],
         # streaming=True: the caller can watch progress (SSE) instead of staring at a silent terminal.
         capabilities=AgentCapabilities(streaming=True, push_notifications=False),
+        # HOW to call us, in the contract itself: a bearer JWT. The SDK client's AuthInterceptor reads this and
+        # puts the credential in the right header. (Which callers we TRUST is not in the card: that's auth.py.)
+        security_schemes={
+            AUTH_SCHEME: SecurityScheme(
+                http_auth_security_scheme=HTTPAuthSecurityScheme(
+                    scheme="Bearer",
+                    bearer_format="JWT",
+                    description="Signed by a trusted service: sub = the user it acts for, aud = this URL.",
+                )
+            )
+        },
+        security_requirements=[SecurityRequirement(schemes={AUTH_SCHEME: StringList()})],
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain", "application/json"],
         skills=[
@@ -94,34 +106,6 @@ def agent_card(port: int) -> AgentCard:
     )
 
 
-# --- Who is calling ---------------------------------------------------------------------------------------
-class EmailUser(User):
-    def __init__(self, email: str):
-        self.email = email
-
-    @property
-    def is_authenticated(self) -> bool:
-        return bool(self.email)
-
-    @property
-    def user_name(
-        self,
-    ) -> (
-        str
-    ):  # the SDK's task store is scoped by this: one user can't see another's tasks
-        return self.email
-
-
-class NaiveIdentity(DefaultServerCallContextBuilder):
-    """⚠️ INSECURE ON PURPOSE (lesson 2.2's flaw, moved to the right place): the caller SAYS who the user is in a
-    header, and we believe it. Anyone who can reach this port can act as anyone.
-    The PLACE is right, though: the SDK asks "who is this?" here, per request, before any business code runs.
-    Lesson 2.5 keeps this seam and swaps the header for a signed token that we VERIFY."""
-
-    def build_user(self, request: Request) -> User:
-        return EmailUser(request.headers.get(USER_HEADER, ""))
-
-
 # --- The agent behind the protocol ------------------------------------------------------------------------
 class AccessExecutor(AgentExecutor):
     """The SDK calls execute() once per message; we publish what happened as events (TaskUpdater)."""
@@ -133,11 +117,9 @@ class AccessExecutor(AgentExecutor):
         self.agents: dict[tuple[str, str], Agent] = {}
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        # Already VERIFIED by auth.py (signature, audience, expiry, known user) before the SDK called us.
         email = context.call_context.user.user_name
-        try:
-            session = session_for(email)
-        except KeyError:
-            raise InvalidParamsError(message=f"Unknown user: {email!r}") from None
+        session = session_for(email)
         if (
             context.current_task is None
         ):  # a new task: it must exist before any status update
@@ -205,10 +187,14 @@ def make_app(service: AccessExecutor, port: int) -> Starlette:
         agent_executor=service, task_store=InMemoryTaskStore(), agent_card=card
     )
     routes = [
-        *create_agent_card_routes(agent_card=card),  # GET /.well-known/agent-card.json
-        *create_jsonrpc_routes(handler, RPC_PATH, context_builder=NaiveIdentity()),
+        *create_agent_card_routes(agent_card=card),  # GET /.well-known/agent-card.json (public)
+        *create_jsonrpc_routes(handler, RPC_PATH),  # POST /a2a (token required)
     ]
-    return Starlette(routes=routes)
+    # Runs before every route: no valid token → 401, and neither the SDK nor our executor ever sees the request.
+    # The SDK's default context builder then takes the verified user from request.user.
+    backend = DelegatedTokenBackend(audience=card.supported_interfaces[0].url, protected_path=RPC_PATH)
+    auth = Middleware(AuthenticationMiddleware, backend=backend, on_error=unauthorized)
+    return Starlette(routes=routes, middleware=[auth])
 
 
 def make_server(

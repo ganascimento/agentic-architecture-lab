@@ -58,7 +58,8 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
 - **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (35 casos × 3) só nos marcos.
 - `.env` na raiz com `OPENAI_API_KEY` (nunca commitar; está no `.gitignore`)
 - Módulo 1 sem framework de agentes (de propósito); LangGraph entra no módulo 4
-- Módulo 2: `a2a-sdk[http-server]==1.1.5` + `uvicorn` (versões FIXADAS: os dois lados do protocolo precisam concordar)
+- Módulo 2: `a2a-sdk[http-server]==1.1.5` + `uvicorn` + `pyjwt[crypto]` (versões FIXADAS: os dois lados do protocolo
+  precisam concordar). Chaves Ed25519 do Service Desk em `.keys/` (gerada no 1º uso, git-ignored).
 - Demais dependências são decididas no módulo em que aparecem (e registradas aqui)
 - Docker disponível para serviços auxiliares (vector DB, observabilidade etc.)
 
@@ -78,6 +79,7 @@ notes/SUMMARY.md           # ARQUIVO ÚNICO de revisão (PT-BR): uma seção por
 src/
   __main__.py              # chat no terminal: login + --arch
   config.py  auth.py       # modelos/preços · login local → Session (identidade vem daqui, nunca do chat)
+  identity.py              # token delegado ASSINADO p/ outros serviços (iss=service-desk, sub=usuário, aud, exp 60s)
   data.py                  # "sistemas" fake: contas, diretório, KB, tickets, acessos, status de sistemas
   core/agent.py            # loop genérico (Agent, ToolCall, Usage); gancho `intercept`; `registry` de tools
   tools/                   # sistemas DO SERVICE DESK (vira MCP no módulo 3): knowledge tickets account
@@ -86,9 +88,8 @@ src/
                            # · remote (RemoteAgent: nó do grafo que é agente de outro time via A2A, sem LLM)
   services/                # agentes de OUTROS times como serviços
     a2a_client.py          # cliente A2A no SDK (descoberta + envio com streaming + GetTask), fachada síncrona
-    a2a_protocol.py        # o que os 2 lados combinam FORA da spec: header de identidade (ingênuo até a 2.5)
-    access_a2a/            # time de IAM: server (SDK: AccessExecutor + NaiveIdentity) · agent (ACCESS_ROLE +
-                           # ask_user) · tools · data (solicitações)
+    access_a2a/            # time de IAM: server (SDK: AccessExecutor, card c/ security scheme) · auth (verifica o
+                           # token: 401 antes do protocolo) · agent (ACCESS_ROLE + ask_user) · tools · data
 tests/                     # sem LLM: tools, auth, a2a, architectures (serviço A2A falso em conftest.py)
 evals/                     # cases.py (35 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe o
                            # serviço; custo/chamadas = nosso + remoto), results/ (fora do git: gerado a cada run)
@@ -152,9 +153,22 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
     versão; `enable_v0_3_compat` resolveria). Eval acesso/multi/segurança 3 runs: 100%, custo/latência iguais.
     Fixação respondida: 1 ok; 2 metade (prova interop só no que foi exercitado); 3 recurso certo = compat v0.3 no card.
     Pendente: TTL das conversas — expirar JUNTOS `agents` e o `InMemoryTaskStore` (política nossa, nada expira sozinho).
-    **Para a 2.5 (achado do /simplify):** identidade via Starlette `AuthenticationMiddleware` + `AuthenticationBackend`
-    (401 antes do JSON-RPC; hoje usuário desconhecido chega ao `execute` e vira `InvalidParamsError`) — no backend
-    entra a verificação do token assinado; some `EmailUser`/`NaiveIdentity`.
+  - [x] 2.4 Acessos como serviço A2A + eval: entregue ao longo da reestruturação/2.3 (serviço independente, card,
+    eval sobe o serviço e checa pelo artifact). Eval COMPLETO (35×3, com o token da 2.5): **91% (96/105)**, 4,9 chamadas,
+    US$ 0,0005/caso, 8,3 s. Falhas: 1/2/11/32 = ping-pong Suporte↔triagem (conhecido, a tratar); 15 = trivia (0/3,
+    conhecido); 18 = 1/3 (o Acessos ainda julga o mérito de "colega de férias" às vezes).
+  - [x] 2.5 identidade entre serviços: header ingênuo → **JWT assinado (Ed25519)** emitido pelo Service Desk
+    (`src/identity.py`): assinatura = QUEM chama (iss), claims = EM NOME DE QUEM (sub), aud = URL do agente (sem
+    replay em outro serviço), exp 60s (token por chamada). Assimétrico: IAM só VERIFICA (chave pública), não emite.
+    Card declara `security_schemes` (Bearer JWT) → `AuthInterceptor` do SDK põe o header; `DelegatedCredentials`
+    (CredentialService) emite o token. Servidor: Starlette `AuthenticationMiddleware` + `DelegatedTokenBackend`
+    (`access_a2a/auth.py`): alg fixado (EdDSA), issuer na lista de confiança DO IAM, aud, exp, usuário conhecido →
+    senão 401 antes do SDK. Saíram `NaiveIdentity`/`EmailUser`/`a2a_protocol.py`. Testes: sem token, header antigo,
+    chave forjada, aud errado, expirado, issuer desconhecido, usuário desconhecido → 401.
+    ⚠️ Fronteira que RESTA (teste documenta): o IAM crê em qualquer `sub` que o Service Desk assina → SD
+    comprometido age como qualquer um. Correção: IdP + token exchange (RFC 8693) a partir do token do USUÁRIO
+    (Fase final). Também: HTTP sem TLS (token pode ser capturado na rede, janela de 60s; sem `jti` anti-replay);
+    chave privada em arquivo (prod: secret manager + JWKS p/ rotação); em /mnt/c o chmod 600 não vale (NTFS).
 - [x] **Módulo 1 — Multi-Agent Architecture** (fechado pelo aluno em 2026-09-27)
   - 1.1 teoria · 1.2 single-agent · 1.3 eval + routing · 1.4 handoff (malha e hub) + auth + tools novas · 1.5 SUMMARY.
   - Resultados-chave (eval v2): single ~90% e o mais barato; routing melhor em vários pedidos/ambíguos (+~20% custo);

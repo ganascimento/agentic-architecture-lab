@@ -18,7 +18,7 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 - 🧠 **Framework-free agent loop**: the model calls tools in a plain Python loop you can read end to end.
 - 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account), who talk to the user directly.
 - 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC.
-- 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access.
+- 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access. Between services, a short-lived signed token (JWT) says who calls and on whose behalf.
 - 🧾 **Provenance checks**: the code verifies that an access justification came from the user's own words.
 - 💰 **Evals with numbers**: pass rate, model calls, cost and latency per case.
 
@@ -162,14 +162,14 @@ Results are saved to `evals/results/` (git-ignored: regenerated on every run).
 src/
 ├── __main__.py            # Terminal chat: login + Service Desk
 ├── config.py · auth.py    # Model/prices · local login → Session
+├── identity.py            # Signed delegated token (JWT, Ed25519) for calls to other services
 ├── data.py                # Fake company systems: accounts, directory, KB, tickets, system status
 ├── core/agent.py          # The generic agent loop
 ├── tools/                 # The Service Desk's tools (knowledge, tickets, account) + provenance check
 ├── architectures/         # The hub: triage + specialists, and the remote (A2A) node
 └── services/
-    ├── a2a_protocol.py    # What both sides agree on beyond the spec (the naive identity header)
     ├── a2a_client.py      # A2A client on the SDK (discovery + streaming send + GetTask)
-    └── access_a2a/        # The IAM team's Access agent as an A2A service (server, agent, tools, data)
+    └── access_a2a/        # The IAM team's Access agent as an A2A service (server, auth, agent, tools, data)
 tests/                     # No-LLM tests
 evals/                     # Eval cases, runner and saved results
 notes/SUMMARY.md           # Study notes and architecture decisions (PT-BR)
