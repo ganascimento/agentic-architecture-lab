@@ -16,10 +16,11 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 ## ✨ Features
 
 - 🧠 **Framework-free agent loop**: the model calls tools in a plain Python loop you can read end to end.
-- 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account), who talk to the user directly.
+- 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account, Catalog), who talk to the user directly.
 - 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC with streaming progress (official `a2a-sdk`).
 - 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access. Between services, a short-lived signed token (JWT) says who calls and on whose behalf.
-- 🧾 **Provenance checks**: the code verifies that an access justification came from the user's own words.
+- 🧾 **Provenance checks**: the code verifies that a justification (access, licensed software) or a ticket resolution came from the user's own words.
+- 🏢 **A realistic IT domain**: knowledge base with internal-only articles, incidents and maintenance windows, tickets with deadlines (SLA), escalation and duplicate detection, remote device diagnostics, and a service catalog (pre-approved, manager-approved and blocked items). Business rules live in code, not in prompts.
 - 💰 **Evals with numbers**: pass rate, model calls, cost and latency per case.
 
 ## 🛠 Tech Stack
@@ -111,8 +112,10 @@ Log in with a test account (plaintext passwords, study only):
 | `joao` | `joao123` | João Lima (Finance) |
 | `carlos` | `carlos123` | Carlos Reis (Sales manager) |
 | `marta` | `marta123` | Marta Alves (Finance manager) |
+| `pedro` | `pedro123` | Pedro Costa (Sales, **contractor**: pre-approved catalog items only) |
+| `bruno` | `bruno123` | Bruno Tavares (IT: sees internal KB articles) |
 
-Chat commands: `/new` starts a new conversation, `/state` shows tickets and password resets, `/quit` exits.
+Chat commands: `/new` starts a new conversation, `/state` shows tickets, catalog requests and password resets, `/quit` exits.
 Access requests live in the Access agent's service: ask the agent about them ("my access requests").
 
 Try these messages:
@@ -122,6 +125,10 @@ my vpn won't connect
 I need access to the Finance folder for the monthly closing
 the VPN has been down since yesterday and I need access to SAP to post invoices
 I forgot my password
+my laptop is really slow                        ← remote diagnostic of the user's laptop
+is anything down today?                         ← every active incident
+INC0001 is past its deadline, please escalate it
+I need 7-Zip / I need Power BI Pro to build the closing reports
 ```
 
 ### Seeing A2A in action
@@ -154,14 +161,14 @@ python -m pytest -q
 
 ## 📊 Evals
 
-35 cases (knowledge base, tickets, access requests, several requests in one message, multi-turn dialogs, prompt injection, impersonation, IDOR, out of scope), graded by code. The eval starts the Access agent in a background thread, and adds its LLM cost to ours.
+50 cases (knowledge base, tickets, SLA and escalation, duplicates, device diagnostics, service catalog, access requests, several requests in one message, multi-turn dialogs, direct and indirect prompt injection, impersonation, IDOR, internal data, out of scope), graded by code. The eval starts the Access agent in a background thread, and adds its LLM cost to ours.
 
 ```bash
 python -m evals.run                    # all cases, 3 runs each
 python -m evals.run --runs 1 --case 10 31
 ```
 
-Results are saved to `evals/results/` (git-ignored: regenerated on every run). Latest full run (35 cases × 3): **93%**, 4.7 model calls and 6.1 s per case.
+Results are saved to `evals/results/` (git-ignored: regenerated on every run). Latest full run (50 cases × 3): **98%**, 4.7 model calls and 6.6 s per case.
 
 ## 📁 Project Structure
 
@@ -170,10 +177,10 @@ src/
 ├── __main__.py            # Terminal chat: login + Service Desk
 ├── config.py · auth.py    # Model/prices · local login → Session
 ├── identity.py            # Signed delegated token (JWT, Ed25519) for calls to other services
-├── data.py                # Fake company systems: accounts, directory, KB, tickets, system status
+├── data.py                # Fake company systems: accounts, directory, KB, status, tickets, devices, catalog
 ├── core/agent.py          # The generic agent loop
-├── tools/                 # The Service Desk's tools (knowledge, tickets, account) + provenance check
-├── architectures/         # The hub: triage + specialists, and the remote (A2A) node
+├── tools/                 # The Service Desk's tools (knowledge, tickets, account, assets, catalog) + provenance check
+├── architectures/         # The hub: triage + specialists (Support, Account, Catalog), and the remote (A2A) node
 └── services/
     ├── a2a_client.py      # A2A client on the SDK (discovery + streaming send + GetTask)
     └── access_a2a/        # The IAM team's Access agent as an A2A service (server, auth, agent, tools, data)

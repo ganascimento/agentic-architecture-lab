@@ -53,7 +53,7 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
 - Rodar (venv ativo), dois terminais: `python -m src.services.access_a2a` (Acessos, time de IAM) e `python -m src`
   (Service Desk; login ana/ana123 etc. em `src/data.py`). `python -m pytest -q` (sem LLM) ·
   `python -m evals.run [--case ...] [--runs N]` (sobe o serviço sozinho).
-- **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (35 × 3, ~US$ 0,05) só nos marcos.
+- **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (50 × 3, ~US$ 0,10) só nos marcos.
 - Módulo 1 sem framework (de propósito). Módulo 2: `a2a-sdk[http-server]==1.1.5`, `uvicorn`, `pyjwt[crypto]` —
   versões FIXADAS (os dois lados do protocolo precisam concordar). Chave Ed25519 do Service Desk em `.keys/`
   (gerada no 1º uso, git-ignored). LangGraph entra no módulo 4. Demais dependências: no módulo em que aparecem.
@@ -79,18 +79,19 @@ src/
   __main__.py              # chat no terminal: login + Service Desk
   config.py  auth.py       # modelos/preços · login local → Session (identidade vem daqui, nunca do chat)
   identity.py              # token delegado ASSINADO p/ outros serviços (iss=service-desk, sub=usuário, aud, exp 60s)
-  data.py                  # "sistemas" fake: contas, diretório, KB, tickets, status de sistemas
+  data.py                  # "sistemas" fake: contas/diretório, KB (pública + interna), status/incidentes, tickets
+                           # (SLA, comentários de terceiros), dispositivos (CMDB), catálogo. Relógio FIXO (`NOW`)
   core/agent.py            # loop genérico (Agent, ToolCall, Usage); gancho `intercept`; `registry` de tools
-  tools/                   # sistemas DO SERVICE DESK (vira MCP no módulo 3): knowledge tickets account
-                           # + _schema (Tool) + provenance (argumento veio do usuário?). Sem tools de acesso.
-  architectures/           # service_desk() = HUB: handoff (grafo, triagem-agente) · specialists (Suporte, Conta)
-                           # · remote (RemoteAgent: nó do grafo que é agente de outro time via A2A, sem LLM)
+  tools/                   # sistemas DO SERVICE DESK (vira MCP no módulo 3): knowledge tickets account assets
+                           # catalog + _schema (Tool) + provenance (argumento veio do usuário?). Sem tools de acesso.
+  architectures/           # service_desk() = HUB: handoff (grafo, triagem-agente) · specialists (Suporte, Conta,
+                           # Catálogo) · remote (RemoteAgent: nó do grafo = agente de outro time via A2A, sem LLM)
   services/                # agentes de OUTROS times como serviços
     a2a_client.py          # cliente A2A no SDK (descoberta + envio com streaming + GetTask), fachada síncrona
     access_a2a/            # time de IAM: server (SDK: AccessExecutor, card c/ security scheme) · auth (verifica o
                            # token: 401 antes do protocolo) · agent (ACCESS_ROLE + ask_user) · tools · data
 tests/                     # sem LLM: tools, auth, a2a, architectures (serviço A2A falso em conftest.py)
-evals/                     # cases.py (35 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe o
+evals/                     # cases.py (50 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe o
                            # serviço; custo/chamadas = nosso + remoto), results/ (fora do git: gerado a cada run)
 ```
 
@@ -108,7 +109,17 @@ evals/                     # cases.py (35 casos; acesso checado pelo artifact A2
 
 Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md` e o histórico do git.
 
-- **Módulo atual:** 3 — MCP (Model Context Protocol). Ainda não iniciado (o aluno tem um pedido antes).
+- **Módulo atual:** 3 — MCP (Model Context Protocol). 3.1 teoria dada (2026-10-01).
+  - **Preparação (2026-09-30, pedido do aluno):** domínio enriquecido, ainda em function calling (base para comparar
+    com MCP): KB com artigos internos (só TI) + `get_kb_article`; incidentes/manutenção (`list_active_incidents`);
+    tickets com SLA, escalonamento (só após o prazo), fechamento (resolução com proveniência), duplicado (por
+    produto); `assets` (dispositivos + diagnóstico remoto); `catalog` (pré-aprovado / gestor / bloqueado,
+    terceirizado, elegibilidade de troca de notebook) num **especialista novo (Catálogo)**; usuários pedro
+    (terceirizado) e bruno (TI); comentário de fornecedor com **injeção plantada** (INC0003). Eval 35 → 50 casos.
+  - Achados no caminho: duplicado por categoria/palavras falhou (categoria escolhida pelo LLM; PT × EN) → por
+    produto; proveniência com id opaco (`SW004`) aceitava "Solicito Adobe Acrobat Pro" → `describe_request`;
+    transferências paralelas ao MESMO agente perdiam um pedido (caso 11) → notas mescladas.
+  - Eval completo 50×3 = **98%** (só o caso 15 falha), 4,7 chamadas, 6,6 s, US$ 0,10. Antes das 3 correções: 94%.
 - [x] **Módulo 2 — A2A** (fechado pelo aluno em 2026-09-29)
   - 2.1 teoria · 2.2 A2A à mão (stdlib) · 2.3 SDK oficial (streaming, GetTask, erros tipados) · 2.4 Acessos como
     serviço A2A + eval · 2.5 identidade entre serviços (JWT Ed25519: iss/sub/aud/exp, verificado antes do protocolo).
@@ -125,16 +136,23 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
 
 ## Pendências encaminhadas (retomar no módulo indicado)
 
-- **Módulo 3 (MCP):** as tools do Service Desk (`src/tools/`: knowledge, tickets, account) viram servidor MCP;
-  comparar MCP × A2A × function calling na prática.
+- **Módulo 3 (MCP):** as tools do Service Desk (`src/tools/`: knowledge, tickets, account, assets, catalog) viram
+  servidores MCP; comparar MCP × A2A × function calling na prática. Ganchos já no domínio: KB/incidentes como
+  **resources** (tool × resource), `force_new` (confirmação por flag do LLM) × **elicitation**, diagnóstico como
+  operação lenta → **progress**, fronteira de servidor por sistema (quem é dono de qual dado), 18 tools → custo de
+  contexto/seleção de tools, identidade do usuário no servidor MCP (D4/D10 de novo).
 - **Módulo 4 (LangGraph):** **supervisor** (agent-as-tool + síntese), comparar "à mão × framework"; human-in-the-loop
   para a aprovação da D2 (a task de acesso termina em `pending_approval`; aprovar é outro fluxo).
 - **Módulo 5 (Registry):** `AgentSpec` + grafo do handoff quase declarativos; unificar "o que cada agente trata";
   **contrato do dado estruturado** do artifact (`accessRequest` não está descrito no card → schema/extensão
   versionada); catálogo/descoberta quando houver muitos agentes remotos; Extended Agent Card.
-- **Módulo 6 (Segurança):** triagem responde trivia (caso 15, 0/3); checagem de SENTIDO da justificativa
+- **Módulo 6 (Segurança):** injeção indireta em comentário de terceiro (INC0003, caso 40 — hoje só a proveniência
+  do `close_ticket` segura; prompt de propósito sem defesa); artigo público aponta p/ interno (KB003 → KB017, PIN);
+  triagem responde trivia (caso 15, 0/3); checagem de SENTIDO da justificativa
   (LLM-as-judge; proveniência só pega invenção, teste `xfail`); assinatura `[x agent]` ainda in-band; TTL das
   conversas no serviço de IAM (`agents` + `InMemoryTaskStore` nunca expiram — expirar juntos).
+- **Módulo 7 (RAG):** busca da KB por palavra (viés de artigo longo); duplicado de ticket por similaridade de
+  sentido (hoje lista de produtos); filtro de permissão (artigo interno) DENTRO do retrieval.
 - **Módulo 8 (Evals/Observabilidade):** tracing distribuído entre serviços (propagar `traceparent` no A2A: o agente
   remoto é opaco); negação por frase no checker; `cached_tokens`; eval em paralelo; LLM-as-judge.
 - Comportamento conhecido: Suporte abre chamado de impressora antes de orientar a limpeza (KB003); o Acessos às

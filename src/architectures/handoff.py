@@ -25,6 +25,8 @@ from src.architectures.remote import RemoteAgent
 from src.architectures.specialists import (
     ACCOUNT_ROLE,
     ACCOUNT_TOOLS,
+    CATALOG_ROLE,
+    CATALOG_TOOLS,
     SUPPORT_ROLE,
     SUPPORT_TOOLS,
 )
@@ -72,9 +74,9 @@ SPECS = {
     "support": AgentSpec(
         SUPPORT_ROLE,
         frozenset(SUPPORT_TOOLS),
-        "Use it for technical problems (VPN, network, "
-        "printer, email, computer, software, SAP errors or slowness), system status, how-to "
-        "questions and IT tickets.",
+        "Use it for technical problems — something broken or slow (VPN, network, Wi-Fi, "
+        "printer, email, Teams, laptop, software, SAP errors or slowness), system status and incidents, "
+        "device diagnostics, how-to questions and IT tickets (status, comments, escalation, closing).",
     ),
     "account": AgentSpec(
         ACCOUNT_ROLE,
@@ -82,11 +84,20 @@ SPECS = {
         "Use it for the user's own account: password "
         "reset and profile (department, manager).",
     ),
+    # Module 3 prep: a new specialist = one node here + one edge from the hub (nothing else changes).
+    "catalog": AgentSpec(
+        CATALOG_ROLE,
+        frozenset(CATALOG_TOOLS),
+        "Use it for requests for something NEW from the service catalog: installing software (e.g. Adobe "
+        "Acrobat, Power BI, Zoom), equipment (headset, monitor, mouse) and laptop replacement. Not for broken "
+        "things (support) nor for access to systems or folders (access).",
+    ),
 }
 HUB = {
-    "triage": ["support", "account", "access"],
+    "triage": ["support", "account", "catalog", "access"],
     "support": ["triage"],
     "account": ["triage"],
+    "catalog": ["triage"],
 }
 
 _REASON = {
@@ -197,13 +208,18 @@ class HandoffServiceDesk:
                 HANDOFF_BLOCKED,
                 False,
             )  # A→B→A in one turn: B would redo its work — reply yourself
+        need = arguments.get("reason", "")
+        if self.pending == target:
+            # Two parallel transfers to the SAME agent (one per request) are one transfer with two needs.
+            # Ignoring the 2nd dropped a request (eval case 11: printer + Outlook → Outlook lost, 4/8 runs).
+            self.note += f" Also: {need}"
+            return HANDOFF_ACK, True
         if self.pending:
-            # Two transfers in one answer (parallel tool calls): only the first counts. Without this, the
+            # Two transfers to DIFFERENT agents in one answer: only the first counts. Without this, the
             # second silently overwrote the first and a request was lost (eval case 10, hub).
             return HANDOFF_IGNORED, False
         # Not switched now: the switch happens AFTER this agent writes its reply. Otherwise its
         # work never reaches the shared conversation and the next agent redoes it (ping-pong).
-        need = arguments.get("reason", "")
         self.pending, self.note = target, HANDOFF_NOTE.format(sender=self.active, receiver=target, need=need)
         return HANDOFF_ACK, True
 

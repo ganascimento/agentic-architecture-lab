@@ -29,7 +29,7 @@ def main() -> None:
         print(f"\nThe Access agent is not reachable at {ACCESS_AGENT_URL}. Start it: python -m src.services.access_a2a")
         return
     print(f"\nService Desk — logged in as {session.name} <{session.email}>")
-    print("Commands: /new (new conversation), /state (tickets), /quit\n")
+    print("Commands: /new (new conversation), /state (tickets, catalog requests), /quit\n")
 
     while True:
         try:
@@ -47,6 +47,7 @@ def main() -> None:
         if text == "/state":
             # Only OUR systems: access requests are the IAM team's data — ask the agent ("my access requests").
             print("Tickets:", data.TICKETS or "none")
+            print("Catalog requests:", data.CATALOG_REQUESTS or "none")
             print("Password resets:", data.PASSWORD_RESETS or "none", "\n")
             continue
 

@@ -17,7 +17,7 @@ def _fake_call(name: str, arguments: str = '{"reason": "x"}'):
 def test_the_service_desk_cannot_touch_access_requests(client):
     # Module 2: access requests are the IAM team's — no local agent has (or can run) those tools.
     desk = service_desk(ANA, False, client)
-    for name in ("triage", "support", "account"):
+    for name in ("triage", "support", "account", "catalog"):
         assert desk.agents[name].allowed_tools.isdisjoint({"create_access_request", "list_my_access_requests"})
     _, is_error = run_tool("create_access_request", {"resource": "SAP", "justification": "x"}, ANA)
     assert is_error is True  # not in the Service Desk's registry at all
@@ -33,8 +33,10 @@ def test_triage_learns_the_remote_agent_from_its_card(client):
 def test_hub_triage_has_no_domain_tools_and_spokes_only_know_the_hub(client):
     desk = service_desk(ANA, False, client)
     assert desk.active == "triage"
-    assert desk.agents["triage"].allowed_tools == {"transfer_to_support", "transfer_to_account", "transfer_to_access"}
-    for name in ("support", "account"):
+    assert desk.agents["triage"].allowed_tools == {
+        "transfer_to_support", "transfer_to_account", "transfer_to_catalog", "transfer_to_access",
+    }
+    for name in ("support", "account", "catalog"):
         assert {t for t in desk.agents[name].allowed_tools if t.startswith("transfer_to_")} == {"transfer_to_triage"}
 
 
@@ -42,6 +44,15 @@ def test_only_the_account_specialist_can_reset_passwords(client):
     desk = service_desk(ANA, False, client)
     assert "request_password_reset" not in desk.agents["support"].allowed_tools
     assert {"request_password_reset", "get_my_profile"} <= desk.agents["account"].allowed_tools
+
+
+def test_only_the_catalog_specialist_can_create_catalog_requests(client):
+    # A request that may need approval is a power of its own (D1): support diagnoses, it doesn't order.
+    desk = service_desk(ANA, False, client)
+    writes = {"order_catalog_item", "request_catalog_approval"}
+    assert writes <= desk.agents["catalog"].allowed_tools
+    for name in ("triage", "support", "account"):
+        assert desk.agents[name].allowed_tools.isdisjoint(writes)
 
 
 def _silent_hub(desk):
@@ -98,6 +109,16 @@ def test_only_the_first_of_two_parallel_transfers_counts(client):
     desk.active, desk.blocked, desk.pending = "triage", set(), None
     desk.agents["triage"]._execute_tool_calls([_fake_call("transfer_to_support"), _fake_call("transfer_to_access")])
     assert desk.pending == "support"
+
+
+def test_parallel_transfers_to_the_same_agent_merge_their_needs(client):
+    desk = service_desk(ANA, False, client)
+    desk.active, desk.blocked, desk.pending = "triage", set(), None
+    desk.agents["triage"]._execute_tool_calls([
+        _fake_call("transfer_to_support", '{"reason": "blurry printer"}'),
+        _fake_call("transfer_to_support", '{"reason": "outlook not syncing"}'),
+    ])
+    assert desk.pending == "support" and "blurry printer" in desk.note and "outlook not syncing" in desk.note
 
 
 def test_real_tools_are_not_intercepted(client):

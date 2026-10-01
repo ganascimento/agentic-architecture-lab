@@ -1,4 +1,4 @@
-"""Tool registry. One module per company "system" (in module 3 each one becomes an MCP server).
+"""Tool registry. One module per company "system" (in module 3 they become MCP servers).
 
 Key point: the LLM never executes anything. It only *asks* to call a tool, with arguments.
 Our code does the executing — which is why we can control what each agent is allowed to do.
@@ -10,12 +10,14 @@ from collections.abc import Collection
 from openai.types.chat import ChatCompletionToolParam
 
 from src.auth import Session
-from src.tools import account, knowledge, provenance, tickets
+from src.tools import account, assets, catalog, knowledge, provenance, tickets
 from src.tools._schema import Tool
 
 # The Service Desk's systems. Access requests are NOT here since module 2: they belong to the IAM team's
 # service (src/services/access_a2a), so nothing in the Service Desk can create one by itself.
-REGISTRY: dict[str, Tool] = {t.name: t for t in [*knowledge.TOOLS, *tickets.TOOLS, *account.TOOLS]}
+REGISTRY: dict[str, Tool] = {
+    t.name: t for t in [*knowledge.TOOLS, *tickets.TOOLS, *account.TOOLS, *assets.TOOLS, *catalog.TOOLS]
+}
 
 
 def tools_for(names: Collection[str], registry: dict[str, Tool] = REGISTRY) -> list[ChatCompletionToolParam]:
@@ -46,6 +48,8 @@ def run_tool(
     for arg in tool.from_user:
         # The other arguments ARE the request (e.g. the resource): their words don't prove anything.
         request_text = " ".join(str(v) for k, v in arguments.items() if k != arg)
+        if tool.describe_request:
+            request_text += " " + tool.describe_request(arguments)
         problem = provenance.check(arg, str(arguments.get(arg, "")), user_texts or [], request_text)
         if problem:
             return f"Error: {problem}", True

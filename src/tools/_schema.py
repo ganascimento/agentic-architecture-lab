@@ -24,6 +24,9 @@ class Tool:
     run: Callable[..., object]  # run(session, **arguments_from_the_llm)
     # Arguments that must come from the user's own words, verified by code (see provenance.py).
     from_user: tuple[str, ...] = ()
+    # What the request IS, in words, when the arguments don't say it (an opaque id like "SW004"). Provenance
+    # removes these words from the justification: "I want Adobe Acrobat Pro" is the request, not a reason.
+    describe_request: Callable[[dict], str] | None = None
 
     @property
     def name(self) -> str:
