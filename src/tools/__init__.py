@@ -1,23 +1,27 @@
-"""Tool registry. One module per company "system" (in module 3 they become MCP servers).
+"""Tool registry: the systems that still run IN our process. One module per company "system".
 
 Key point: the LLM never executes anything. It only *asks* to call a tool, with arguments.
 Our code does the executing — which is why we can control what each agent is allowed to do.
 """
 
+from __future__ import annotations
+
 import json
 from collections.abc import Collection
-
-from openai.types.chat import ChatCompletionToolParam
+from typing import TYPE_CHECKING
 
 from src.auth import Session
-from src.tools import account, assets, catalog, knowledge, provenance, tickets
+from src.tools import account, assets, catalog, knowledge, provenance
 from src.tools._schema import Tool
 
-# The Service Desk's systems. Access requests are NOT here since module 2: they belong to the IAM team's
-# service (src/services/access_a2a), so nothing in the Service Desk can create one by itself.
-REGISTRY: dict[str, Tool] = {
-    t.name: t for t in [*knowledge.TOOLS, *tickets.TOOLS, *account.TOOLS, *assets.TOOLS, *catalog.TOOLS]
-}
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionToolParam
+
+# The Service Desk's LOCAL systems (function calling, same process). Not here:
+# - access requests (module 2): the IAM team's agent, over A2A — nothing in the Service Desk can create one;
+# - tickets (module 3): the ticketing system's MCP server — its tools are DISCOVERED at runtime (tools/list) and
+#   merged into an agent's registry by the desk (architectures/handoff.py). Same Tool objects, same run_tool.
+REGISTRY: dict[str, Tool] = {t.name: t for t in [*knowledge.TOOLS, *account.TOOLS, *assets.TOOLS, *catalog.TOOLS]}
 
 
 def tools_for(names: Collection[str], registry: dict[str, Tool] = REGISTRY) -> list[ChatCompletionToolParam]:

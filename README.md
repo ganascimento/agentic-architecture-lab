@@ -18,6 +18,7 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 - 🧠 **Framework-free agent loop**: the model calls tools in a plain Python loop you can read end to end.
 - 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account, Catalog), who talk to the user directly.
 - 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC with streaming progress (official `a2a-sdk`).
+- 🔌 **Model Context Protocol (MCP)**: the ticketing system is its own MCP server (a child process over stdio) that owns the ticket data. The Service Desk discovers its tools at runtime and the agents call them like local ones. Client and server are hand-written for now (spec `2026-07-28`, stateless).
 - 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access. Between services, a short-lived signed token (JWT) says who calls and on whose behalf.
 - 🧾 **Provenance checks**: the code verifies that a justification (access, licensed software) or a ticket resolution came from the user's own words.
 - 🏢 **A realistic IT domain**: knowledge base with internal-only articles, incidents and maintenance windows, tickets with deadlines (SLA), escalation and duplicate detection, remote device diagnostics, and a service catalog (pre-approved, manager-approved and blocked items). Business rules live in code, not in prompts.
@@ -43,7 +44,7 @@ kept in its own branch (`module-N`) and tag (`module-N-final`).
 |---|---|---|
 | 1 | Multi-Agent Architecture: single agent, routing, handoff (mesh and hub) | ✅ done — branch `module-1` |
 | 2 | A2A (Agent2Agent protocol): remote agent, official SDK, streaming, signed service identity | ✅ done — branch `module-2` |
-| 3 | MCP (Model Context Protocol) | 🚧 next |
+| 3 | MCP (Model Context Protocol) | 🚧 in progress: tickets as a hand-written MCP server |
 | 4 | Advanced LangGraph: checkpoints, human-in-the-loop | ⏳ |
 | 5 | Agent Builder + Registry | ⏳ |
 | 6 | Security & Governance | ⏳ |
@@ -87,8 +88,9 @@ Every new terminal needs the virtual environment active first: `source .venv/bin
 | Command | What it does |
 |---|---|
 | `python -m src.services.access_a2a` | Starts the **Access agent** (the IAM team's A2A service) on port 8001 |
-| `python -m src` | Starts the **Service Desk** chat (needs the Access agent running) |
+| `python -m src` | Starts the **Service Desk** chat (needs the Access agent running; starts the tickets MCP server by itself) |
 | `python -m src.services.a2a_client` | A2A demo: discovers the Access agent and runs a two-step task, showing streaming progress |
+| `python -m src.services.mcp_client` | MCP demo: starts the tickets server and shows discover, tools/list, tools/call and what the LLM sees |
 | `python -m pytest -q` | Runs the tests (no LLM calls, no cost) |
 | `python -m evals.run` | Runs the eval (starts the Access agent by itself; calls the LLM) |
 
@@ -115,8 +117,8 @@ Log in with a test account (plaintext passwords, study only):
 | `pedro` | `pedro123` | Pedro Costa (Sales, **contractor**: pre-approved catalog items only) |
 | `bruno` | `bruno123` | Bruno Tavares (IT: sees internal KB articles) |
 
-Chat commands: `/new` starts a new conversation, `/state` shows tickets, catalog requests and password resets, `/quit` exits.
-Access requests live in the Access agent's service: ask the agent about them ("my access requests").
+Chat commands: `/new` starts a new conversation, `/state` shows catalog requests and password resets, `/quit` exits.
+Access requests (IAM's A2A service) and tickets (the MCP server) live in other processes: ask the agent about them ("my tickets", "my access requests").
 
 Try these messages:
 
@@ -151,9 +153,17 @@ Under the hood: `GET /.well-known/agent-card.json` (discovery) → `POST /a2a` `
 `Authorization: Bearer <signed JWT>` header → `GetTask` for the final task. A call without a valid token gets
 HTTP 401 before it reaches the agent.
 
+### Seeing MCP in action
+
+```bash
+python -m src.services.mcp_client
+```
+
+It starts the tickets server as a child process and prints each step: `server/discover` (versions, capabilities), `tools/list`, one tool translated into the function-calling format the LLM gets, and `tools/call` for ana. Asking about another user's ticket returns `isError: true` (a refusal the LLM can read). A call with no user in `_meta` gets a JSON-RPC error (a problem in the calling code).
+
 ## 🧪 Testing
 
-No test calls the LLM: the tools are deterministic, and the A2A tests serve a fake Access agent over real HTTP, including forged, expired and wrong-audience tokens.
+No test calls the LLM. The tools are deterministic. The A2A tests serve a fake Access agent over real HTTP, including forged, expired and wrong-audience tokens. The MCP tests start the real tickets server over stdio.
 
 ```bash
 python -m pytest -q
@@ -177,13 +187,15 @@ src/
 ├── __main__.py            # Terminal chat: login + Service Desk
 ├── config.py · auth.py    # Model/prices · local login → Session
 ├── identity.py            # Signed delegated token (JWT, Ed25519) for calls to other services
-├── data.py                # Fake company systems: accounts, directory, KB, status, tickets, devices, catalog
+├── data.py                # Fake company systems: accounts, directory, KB, status, devices, catalog
 ├── core/agent.py          # The generic agent loop
-├── tools/                 # The Service Desk's tools (knowledge, tickets, account, assets, catalog) + provenance check
+├── tools/                 # Local tools (knowledge, account, assets, catalog) + provenance check
 ├── architectures/         # The hub: triage + specialists (Support, Account, Catalog), and the remote (A2A) node
 └── services/
     ├── a2a_client.py      # A2A client on the SDK (discovery + streaming send + GetTask)
-    └── access_a2a/        # The IAM team's Access agent as an A2A service (server, auth, agent, tools, data)
+    ├── access_a2a/        # The IAM team's Access agent as an A2A service (server, auth, agent, tools, data)
+    ├── mcp_client.py      # Hand-written MCP client (stdio): discover, list, call, translate to function calling
+    └── tickets_mcp/       # The ticketing system as a hand-written MCP server (server, tools, data)
 tests/                     # No-LLM tests
 evals/                     # Eval cases, runner and saved results
 notes/SUMMARY.md           # Study notes and architecture decisions (PT-BR)

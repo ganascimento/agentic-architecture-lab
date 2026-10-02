@@ -29,6 +29,14 @@
   - [Prompt, tools e eval (lições do módulo)](#prompt-tools-e-eval-lições-do-módulo)
   - [Resultado do módulo 2](#resultado-do-módulo-2)
   - [Decisões do módulo 2](#decisões-do-módulo-2)
+- [Módulo 3: MCP (Model Context Protocol)](#módulo-3-mcp-model-context-protocol)
+  - [O que é MCP](#o-que-é-mcp)
+  - [Transporte stdio por baixo](#transporte-stdio-por-baixo)
+  - [Uma requisição por dentro](#uma-requisição-por-dentro)
+  - [Identidade: argumento × _meta](#identidade-argumento--_meta)
+  - [Discover × list](#discover--list)
+  - [Como as tools remotas chegam aos agentes](#como-as-tools-remotas-chegam-aos-agentes)
+  - [Achados da 3.2](#achados-da-32)
 
 ---
 
@@ -231,3 +239,54 @@
 - **D11:** A2A para **agente** de outro contexto ou time, via **fachada** com skills de negócio; tool/MCP para função. Separar por contexto delimitado, não por time.
 - **D12:** a **estrutura** das mensagens entre agentes (quem transferiu, para quem) é escrita pelo código; o LLM só preenche o conteúdo.
 
+---
+
+## Módulo 3: MCP (Model Context Protocol)
+
+### O que é MCP
+- Protocolo para um host (app com LLM) usar **funções e dados de outro dono** — tools, resources, prompts — sem integração sob medida para cada par app × sistema.
+- **MCP não substitui function calling:** o host traduz `tools/list` → formato de tool do LLM, e o `tool_call` do LLM → `tools/call`. O LLM nem sabe que a tool é remota. Muda **onde** o código roda e **quem** é o dono.
+- **MCP × A2A:** MCP para **função** (o NOSSO LLM decide e passa argumentos exatos); A2A para **agente** (delega um objetivo, o outro lado decide) — D11.
+- Spec **`2026-07-28`**: **stateless** — sem `initialize`/sessão; cada request leva versão, `clientInfo` e capacidades no `_meta`. Qualquer instância responde qualquer request (bom atrás de load balancer).
+
+### Transporte stdio por baixo
+- O host sobe o servidor como **processo filho** (`Popen`) e conversa por **dois pipes** do SO: escreve no `stdin` dele, lê do `stdout` dele. Sem rede, sem porta.
+- **JSON-RPC, uma mensagem por linha:** o pipe é só um fluxo de bytes; o `\n` delimita a mensagem.
+- `flush()` obrigatório (pipe tem buffer → sem flush, deadlock). **`stdout` é só do protocolo:** um `print` no servidor corrompe a conversa; log vai para `stderr`.
+- Fim: host fecha o `stdin` → EOF → o servidor sai. Host morre → SO fecha os pipes → mesma coisa (sem órfão).
+- **stdio × HTTP:** stdio = mesma máquina, só o pai fala com o servidor (o SO isola), um servidor por host. HTTP = servidor compartilhado, qualquer um que alcance a porta → precisa de autenticação.
+
+### Uma requisição por dentro
+- `_request` = monta envelope → escreve linha + flush → `readline()` (bloqueia) → confere `id` → `result` ou `error`.
+- Linha vazia = EOF = servidor morreu. Uma requisição por vez, então a próxima linha **é** a resposta; concorrência pediria tabela `id → quem espera` (o SDK faz).
+- **Dois tipos de erro:** `error` JSON-RPC = **protocolo** (método/versão/`_meta`), bug de integração → exceção para o **código**. Regra de negócio ("não é seu ticket", "SLA não venceu") = `result` com `isError: true` → texto para o **LLM** reagir.
+- **Exceção é para quem pode consertar o código; `isError` é para quem pode mudar de estratégia na conversa.**
+
+### Identidade: argumento × _meta
+- Tudo em `arguments` foi **o LLM que escreveu** → o usuário (ou um texto injetado) pode tentar controlar. Email como argumento = ana pede "lista os chamados do bruno" e vê (Achado 1.2 de novo).
+- `_meta` é escrito pelo **código** a partir da `Session`; o LLM só vê `inputSchema`, então **não existe campo** para ele preencher. Argumento inventado (`email`) → `TypeError` → `isError`.
+- Sobrescrever o argumento no host é frágil (uma tool esquecida = falha) e confunde o LLM. Melhor o campo **não existir** (D5 pela estrutura).
+- **Argumento é o que o modelo decide; `_meta` é o que o sistema sabe.** Critério: o LLM legitimamente escolhe? (`justification` sim, usuário não.)
+- Limite: `_meta` fecha a fronteira **LLM → host**. A fronteira **host → servidor** (outro cliente forja o `_meta`) só fecha com token assinado (D10, aula 3.5). Em stdio é tolerável: só o pai escreve no `stdin`.
+
+### Discover × list
+- `server/discover` = **que tipos** de coisa o servidor oferece (`capabilities: {tools, resources, prompts}` + flags como `listChanged`), versões e identidade. Barato, igual para todos.
+- `tools/list` = **quais** tools: pode ser grande (paginado por `cursor`), variar por usuário e mudar com o tempo (`list_changed`).
+- **Contraste com A2A:** o Agent Card lista as skills (poucas, de negócio, para outro agente decidir); tools (muitas, com schema, para um LLM chamar) têm endpoint próprio.
+
+### Como as tools remotas chegam aos agentes
+- `tickets.tools()` transforma cada tool do `tools/list` num `Tool` igual ao local: `definition` (o que o LLM vê) + `run = partial(_run, nome)` (faz `tools/call`) + `from_user`. Padrão **proxy/adapter** — o mesmo do `RemoteAgent` no módulo 2.
+- `registry = REGISTRY | tickets.tools()` → daí em diante ninguém distingue local de remoto.
+- **Metade dinâmica, metade fixa:** descrição/schema/implementação vêm do servidor a cada subida; **quem usa qual tool** é a allowlist de nomes no `SPECS` (nossa). Tool nova do servidor não chega a nenhum agente.
+- Duas travas: o LLM só **vê** a sua fatia (`tools_for`) e o código só **executa** a fatia (`allowed_tools` no `run_tool`), contra alucinação/injeção.
+- Allowlist dinâmica ("tudo que o servidor publicar") é o pitch "plug and play": serve em IDE/assistente pessoal (humano aprova cada chamada). Em agente autônomo, deixaria **outro time** decidir o que o nosso agente pode fazer. Annotations (`readOnlyHint`, `destructiveHint`) são **dica** declarada pelo servidor, não garantia.
+- **Plugável:** as camadas de cima dependem da abstração `Tool`. Trocar a implementação (à mão → SDK) não deve tocar `handoff.py`/`agent.py`; se tocar, a fronteira vazou. Mudar o **contrato** (ex.: falha de infra) mexe em quem usa uma vez, para todas as implementações.
+
+### Achados da 3.2
+- (a) Servidor levava **3,5 s** para subir: importava `openai.types` só por type hint → `TYPE_CHECKING`, 0,15 s. Servidor não deve depender do LLM do host.
+- (b) **Proveniência não cabe no servidor** (ele não vê a conversa): declara em `_meta` (`com.company/fromUser`), o host aplica. Outro host (IDE) pode ignorar → elicitation (3.4).
+- (c) Identidade no `_meta` é **ingênua** (servidor crê no email) → token assinado (3.5).
+- (d) Cliente sem timeout de leitura: servidor travado trava o host → SDK (3.3).
+- (e) ⚠️ **Colisão de nome (tool shadowing):** no `REGISTRY | tickets.tools()` o lado direito vence em silêncio. Um servidor que publique `request_password_reset` sequestra a tool local — e a allowlist não protege (confere só o nome). Correção: falhar na colisão (3.3) e/ou **namespace por servidor** (`mcp__<servidor>__<tool>`, como o Claude Code faz).
+- (f) **Falha de infra vira conversa:** o `run_tool` entrega **qualquer** exceção ao LLM, inclusive `MCPError`/`BrokenPipeError`. Servidor morto → o LLM tenta de novo e inventa desculpa; nosso código nem fica sabendo. Correção: relançar erros de infra (o loop decide: log, alerta, mensagem padrão); só erro de negócio vai ao LLM (3.3 / módulo 8).
+- Resultado: testes 76 → 88; eval dos 20 casos de ticket (1 run) = **20/20**, 4,8 chamadas, 5,9 s — igual à versão local. O protocolo não piorou a qualidade.

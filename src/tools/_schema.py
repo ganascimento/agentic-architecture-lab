@@ -4,10 +4,14 @@ Every implementation receives the Session first, injected by the code — it is 
 so the LLM can't fill it in. That's how "who the user is" stays out of the LLM's hands.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from openai.types.chat import ChatCompletionToolParam
+if TYPE_CHECKING:  # a type hint only: an MCP server built on these Tools must not load the OpenAI SDK (~4 s)
+    from openai.types.chat import ChatCompletionToolParam
 
 NO_ARGS: dict = {"type": "object", "properties": {}}
 

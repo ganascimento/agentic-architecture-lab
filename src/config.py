@@ -4,6 +4,7 @@ than gpt-6-luna. Today every agent runs on AGENT.
 """
 
 import os
+import sys
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -33,3 +34,6 @@ PRICES = {
 
 # Where the IAM team's Access agent lives (module 2). Only the base URL: the rest comes from its Agent Card.
 ACCESS_AGENT_URL = os.getenv("ACCESS_AGENT_URL", "http://localhost:8001")
+
+# The ticketing system's MCP server (module 3): over stdio the host STARTS it — a command, not a URL.
+TICKETS_MCP_COMMAND = [sys.executable, "-m", "src.services.tickets_mcp"]

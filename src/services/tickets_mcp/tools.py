@@ -1,4 +1,5 @@
-"""Ticketing system. Every read/write is scoped to the logged-in user by CODE.
+"""Ticketing system's tools — the business code behind the MCP server (server.py only speaks the protocol).
+Every read/write is scoped to the user the request is ON BEHALF OF, by CODE.
 
 Business rules that live HERE, not in the prompt (decision D5):
 - duplicates: a second open ticket about the same problem is refused (it floods L2) — comment on the first;
@@ -9,8 +10,9 @@ Business rules that live HERE, not in the prompt (decision D5):
 
 from datetime import datetime, timedelta
 
-from src import data
+from src import data  # the company clock (shared infra)
 from src.auth import Session
+from src.services.tickets_mcp import data as itsm  # this system's own data
 from src.tools._schema import NO_ARGS, Tool, definition
 from src.tools.provenance import content_words
 
@@ -35,14 +37,14 @@ _ALIASES = {"impressora": "printer", "notebook": "laptop", "bateria": "battery",
 def _own_ticket(session: Session, ticket_id: str) -> dict:
     """Ownership check against IDOR (Insecure Direct Object Reference): knowing an ID is not permission.
     Same error for "doesn't exist" and "not yours" — otherwise the error itself leaks that the ticket exists."""
-    ticket = data.TICKETS.get(ticket_id.upper())
+    ticket = itsm.TICKETS.get(ticket_id.upper())
     if ticket is None or ticket["email"] != session.email:
         raise ValueError(f"Ticket {ticket_id} not found among your tickets.")
     return ticket
 
 
 def _sla(ticket: dict) -> dict:
-    due = datetime.strptime(ticket["opened_at"], _TIME) + timedelta(hours=data.SLA_HOURS[ticket["priority"]])
+    due = datetime.strptime(ticket["opened_at"], _TIME) + timedelta(hours=itsm.SLA_HOURS[ticket["priority"]])
     return {"due": due.strftime(_TIME), "breached": data.now() > due}
 
 
@@ -55,7 +57,7 @@ def _duplicate_of(session: Session, text: str) -> str | None:
     """The user's open ticket about the same product, if any. Deliberately coarse (two different Outlook problems
     collide): a false alarm costs one question to the user; a missed duplicate costs L2 a second ticket."""
     products = _products(text)
-    for tid, t in data.TICKETS.items():
+    for tid, t in itsm.TICKETS.items():
         if t["email"] == session.email and t["status"] != "closed" and products & _products(f"{t['title']} {t['description']}"):
             return tid
     return None
@@ -67,25 +69,25 @@ def open_ticket(session: Session, title: str, description: str, category: str, p
     # to be used"). MCP has a stronger alternative — the server asks the USER directly (elicitation). Module 3.
     duplicate = None if force_new else _duplicate_of(session, f"{title} {description}")
     if duplicate:
-        existing = data.TICKETS[duplicate]
+        existing = itsm.TICKETS[duplicate]
         raise ValueError(
             f"The user already has an open ticket about this: {duplicate} ('{existing['title']}', "
             f"{existing['status']}). Add a comment to it instead. Only if the user says it's a DIFFERENT "
             "problem, open it with force_new=true."
         )
-    ticket_id = f"INC{len(data.TICKETS) + 1:04d}"
-    data.TICKETS[ticket_id] = {
+    ticket_id = f"INC{len(itsm.TICKETS) + 1:04d}"
+    itsm.TICKETS[ticket_id] = {
         "email": session.email, "title": title, "description": description, "category": category,
         "priority": priority, "status": "open", "opened_at": data.now().strftime(_TIME), "team": _TEAMS[category],
         "comments": [],
     }
-    return {"ticket": ticket_id, "status": "open", "team": _TEAMS[category], "sla": _sla(data.TICKETS[ticket_id])}
+    return {"ticket": ticket_id, "status": "open", "team": _TEAMS[category], "sla": _sla(itsm.TICKETS[ticket_id])}
 
 
 def list_my_tickets(session: Session) -> list[dict]:
     return [
         {"ticket": tid, "title": t["title"], "status": t["status"], "priority": t["priority"]}
-        for tid, t in data.TICKETS.items() if t["email"] == session.email
+        for tid, t in itsm.TICKETS.items() if t["email"] == session.email
     ]
 
 
@@ -129,8 +131,10 @@ def escalate_ticket(session: Session, ticket_id: str) -> dict:
 
 
 def close_ticket(session: Session, ticket_id: str, resolution: str) -> dict:
-    # `resolution` passed the provenance check (from_user below): it's the user's own words, so an instruction
-    # hidden in a ticket comment can't produce it.
+    # `resolution` must be the user's own words (from_user below), so an instruction hidden in a ticket comment
+    # can't produce it. ⚠️ Since module 3 the check runs in the HOST, not here: this server never sees the
+    # conversation, so it can only DECLARE the rule (server.py) and trust the client to enforce it. A client
+    # that ignores the declaration closes tickets on anything. Lesson 3.4 moves it back here (elicitation).
     t = _own_ticket(session, ticket_id)
     if t["status"] == "closed":
         raise ValueError(f"Ticket {ticket_id.upper()} is already closed.")
@@ -151,7 +155,7 @@ TOOLS = [
                 "title": {"type": "string"},
                 "description": {"type": "string", "description": "Summary of the problem and what was already tried"},
                 "category": {"type": "string", "enum": list(_TEAMS)},
-                "priority": {"type": "string", "enum": list(data.SLA_HOURS)},
+                "priority": {"type": "string", "enum": list(itsm.SLA_HOURS)},
                 "force_new": {"type": "boolean", "description": "Only true when the user explicitly said this is a "
                               "DIFFERENT problem from their existing open ticket. Never set it on your own."},
             },

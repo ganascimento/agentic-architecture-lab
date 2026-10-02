@@ -1,11 +1,14 @@
-"""Shared test fixtures — no LLM anywhere: a fake Access agent served over real A2A (HTTP on a free port)."""
+"""Shared test fixtures — no LLM anywhere: a fake Access agent served over real A2A (HTTP on a free port), and
+the real tickets MCP server as a child process (stdio)."""
 
 import pytest
 
+from src.config import TICKETS_MCP_COMMAND
 from src.core.agent import ToolCall, Usage
 from src.services.a2a_client import A2AClient
 from src.services.access_a2a.agent import ASK_USER
 from src.services.access_a2a.server import AccessExecutor, start
+from src.services.mcp_client import MCPClient
 
 
 class FakeAccessAgent:
@@ -42,3 +45,10 @@ def client(service):
     server, url = start(service)
     yield A2AClient(url)
     server.should_exit = True  # uvicorn's graceful stop
+
+
+@pytest.fixture
+def tickets():
+    """The REAL ticketing MCP server, fresh for each test (its data lives in its process: a new one starts clean)."""
+    with MCPClient(TICKETS_MCP_COMMAND) as client:
+        yield client
