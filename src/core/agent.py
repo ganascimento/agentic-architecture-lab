@@ -14,7 +14,7 @@ from openai.types.chat.chat_completion import Choice
 
 from src.auth import Session
 from src.config import AGENT, PRICES, ModelConfig
-from src.tools import REGISTRY, run_tool
+from src.tools import run_tool
 from src.tools._schema import Tool
 
 # One client for the whole process: each OpenAI() opens its own HTTP connection pool (a new TLS handshake
@@ -67,12 +67,13 @@ class Agent:
         session: Session,
         system_prompt: str,
         tools: list[ChatCompletionToolParam],
+        # Where its tools come from (the systems' MCP servers, or another team's service).
+        registry: dict[str, Tool],
         model: ModelConfig = AGENT,
         max_steps: int = 10,
         verbose: bool = True,
         user_texts: list[str] | None = None,
         intercept: Intercept | None = None,
-        registry: dict[str, Tool] = REGISTRY,
     ):
         self.session = session  # who is logged in: passed by the CODE to every tool, never by the LLM
         self.model = model
@@ -92,7 +93,7 @@ class Agent:
         self._owns_user_texts = user_texts is None
         self.user_texts = [] if user_texts is None else user_texts
         self.intercept = intercept
-        self.registry = registry  # where its tools come from (the Service Desk's, or another team's service)
+        self.registry = registry
 
     def reply(self, user_text: str) -> str:
         if self._owns_user_texts:
@@ -162,7 +163,7 @@ class Agent:
         return worked, end_turn
 
     def _run_tool(self, name: str, arguments: dict) -> tuple[str, bool]:
-        result, is_error = run_tool(name, arguments, self.session, self.allowed_tools, self.user_texts, self.registry)
+        result, is_error = run_tool(name, arguments, self.session, self.registry, self.allowed_tools, self.user_texts)
         self.tool_calls.append(ToolCall(name, arguments, result, is_error))
         self._log(f"  🔧 {name}({arguments})")
         self._log(f"     ↳ {'❌ ' if is_error else ''}{result[:200]}")

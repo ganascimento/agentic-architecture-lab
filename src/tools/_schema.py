@@ -26,12 +26,20 @@ def definition(name: str, description: str, parameters: dict = NO_ARGS) -> ChatC
 class Tool:
     definition: ChatCompletionToolParam
     run: Callable[..., object]  # run(session, **arguments_from_the_llm)
-    # Arguments that must come from the user's own words, verified by code (see provenance.py).
+    # Arguments that must come from the user's own words, verified by the HOST (see provenance.py): only the host
+    # has the conversation. A plain list of names, so a server can declare it in the tool's _meta.
     from_user: tuple[str, ...] = ()
-    # What the request IS, in words, when the arguments don't say it (an opaque id like "SW004"). Provenance
-    # removes these words from the justification: "I want Adobe Acrobat Pro" is the request, not a reason.
-    describe_request: Callable[[dict], str] | None = None
 
     @property
     def name(self) -> str:
         return self.definition["function"]["name"]
+
+
+class ToolUnavailable(Exception):
+    """The tool's SYSTEM failed (down, timeout, protocol error) — not a refusal of THIS request.
+
+    Two kinds of failure, two audiences (the same split MCP makes between isError and a JSON-RPC error):
+    - a business refusal ("still within its deadline") is for the LLM: it can rephrase, ask, explain;
+    - a system failure is for OUR code: the LLM can't fix a server that is down, and if it gets the error as
+      text it retries, then makes up an excuse — and nobody on our side ever learns the system is down.
+    So run_tool lets this one through, and the outermost layer (chat, eval) decides what to do."""

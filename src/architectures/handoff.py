@@ -6,8 +6,9 @@ A new agent = one node + one edge from the hub (module 1 measured it against a m
 Since module 2, one node is ANOTHER TEAM's agent: Access runs as the IAM team's A2A service, and here it's a
 RemoteAgent (remote.py) — same place in the graph, but reached over the network, opaque, known by its card.
 
-Since module 3, the TICKET tools come from the ticketing system's MCP server: discovered with tools/list and
-merged into the registry below. The agents and the loop don't change — a remote tool is just another Tool.
+Since module 3, EVERY tool comes from a system's MCP server (tickets, knowledge, account, assets, catalog):
+discovered with tools/list and handed in as one registry. The desk doesn't even know MCP exists — a remote
+tool is just another Tool.
 
 Design decisions:
 1. Context on handoff = the whole conversation as TEXT, signed by author ("[support agent] ..."), without the
@@ -36,9 +37,8 @@ from src.architectures.specialists import (
 from src.auth import Session
 from src.core.agent import Agent, ToolCall, Usage, total_usage
 from src.services.a2a_client import A2AClient
-from src.services.mcp_client import MCPClient
-from src.tools import REGISTRY, tools_for
-from src.tools._schema import definition
+from src.tools import tools_for
+from src.tools._schema import Tool, definition
 
 MAX_HANDOFFS = (
     4  # up to hub → A → hub → B in one turn (two requests in one message) + 1 margin
@@ -162,11 +162,10 @@ def _transfer(target: str) -> str:
 
 
 class HandoffServiceDesk:
-    def __init__(self, session: Session, access: A2AClient, tickets: MCPClient, verbose: bool = True):
+    def __init__(self, session: Session, access: A2AClient, registry: dict[str, Tool], verbose: bool = True):
         self.verbose = verbose
-        # Local tools (function calling) + the ticketing system's (MCP). Least privilege survives the protocol:
-        # an agent still only gets the names in its SPECS — a tool the server adds tomorrow reaches nobody.
-        registry = REGISTRY | tickets.tools()
+        # `registry`: every system's tools (MCP). Least privilege survives the protocol: an agent still only gets
+        # the names in its SPECS — a tool a server adds tomorrow reaches nobody.
         # The SHARED state: the conversation as text. Each agent gets a fresh copy of it when activated
         # (decision 1) — so it also forgets its own tool results from earlier turns. That's the price.
         self.conversation: list[ChatCompletionMessageParam] = []

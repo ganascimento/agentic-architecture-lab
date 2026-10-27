@@ -1,0 +1,31 @@
+"""The CMDB's own data: devices assigned to each user, with the telemetry the remote diagnostic reads.
+Read-only (no tool writes here): no reset."""
+
+DEVICES = {
+    "LAP-0142": {"owner": "ana@company.com", "type": "laptop", "model": "Dell Latitude 5420",
+                 "purchased": "2021-03-10", "warranty_until": "2024-03-10",
+                 "telemetry": {"disk_used_pct": 94, "uptime_days": 21, "pending_updates": 2, "battery_health_pct": 81,
+                               "ram_gb": 16}},
+    "PHN-0077": {"owner": "ana@company.com", "type": "phone", "model": "iPhone 13",
+                 "purchased": "2023-02-01", "warranty_until": "2025-02-01", "telemetry": {}},
+    "LAP-0233": {"owner": "joao@company.com", "type": "laptop", "model": "Lenovo ThinkPad T14 Gen 1",
+                 "purchased": "2021-01-15", "warranty_until": "2025-01-15",
+                 "telemetry": {"disk_used_pct": 61, "uptime_days": 1, "pending_updates": 0, "battery_health_pct": 77,
+                               "ram_gb": 8}},
+    "LAP-0101": {"owner": "carlos@company.com", "type": "laptop", "model": "Dell Latitude 7440",
+                 "purchased": "2024-05-20", "warranty_until": "2027-05-20",
+                 "telemetry": {"disk_used_pct": 48, "uptime_days": 3, "pending_updates": 0, "battery_health_pct": 42,
+                               "ram_gb": 16}},
+    "LAP-0300": {"owner": "marta@company.com", "type": "laptop", "model": "MacBook Pro 14 (2023)",
+                 "purchased": "2023-08-01", "warranty_until": "2026-08-01",
+                 "telemetry": {"disk_used_pct": 55, "uptime_days": 2, "pending_updates": 1, "battery_health_pct": 90,
+                               "ram_gb": 16}},
+    "LAP-0350": {"owner": "pedro@company.com", "type": "laptop", "model": "Dell Latitude 3440 (loaner)",
+                 "purchased": "2025-02-10", "warranty_until": "2028-02-10",
+                 "telemetry": {"disk_used_pct": 30, "uptime_days": 1, "pending_updates": 0, "battery_health_pct": 97,
+                               "ram_gb": 16}},
+    "LAP-0010": {"owner": "bruno@company.com", "type": "laptop", "model": "ThinkPad X1 Carbon Gen 12",
+                 "purchased": "2025-06-01", "warranty_until": "2028-06-01",
+                 "telemetry": {"disk_used_pct": 40, "uptime_days": 5, "pending_updates": 0, "battery_health_pct": 95,
+                               "ram_gb": 32}},
+}

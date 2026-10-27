@@ -42,20 +42,35 @@ def _in_user_words(word: str, user_words: set[str]) -> bool:
     return word in user_words or (len(word) >= 5 and any(len(u) >= 5 and u[:5] == word[:5] for u in user_words))
 
 
+_RESTATES = "it only restates the request, it doesn't say WHY"
+
+
+def _leftover(value: str, request_text: str) -> set[str]:
+    return content_words(value) - content_words(request_text) - _REQUEST_WORDS
+
+
+def _message(arg: str, problem: str) -> str:
+    return f"'{arg}' must be the user's own reason, but {problem}. Ask the user for it — don't write it yourself."
+
+
+def restated(arg: str, value: str, request_text: str) -> str | None:
+    """The half of the check that needs no conversation: is anything left once the request itself is removed?
+    So a SERVER that knows what the request is (the item behind an opaque id) can run it itself."""
+    return None if _leftover(value, request_text) else _message(arg, _RESTATES)
+
+
 def check(arg: str, value: str, user_texts: list[str], request_text: str = "") -> str | None:
     """None if `value` passes; otherwise the error message for the LLM (it should ask the user)."""
     problem = _problem(value, user_texts, request_text)
-    if problem is None:
-        return None
-    return f"'{arg}' must be the user's own reason, but {problem}. Ask the user for it — don't write it yourself."
+    return None if problem is None else _message(arg, problem)
 
 
 def _problem(value: str, user_texts: list[str], request_text: str) -> str | None:
     if not value.strip():
         return "it is empty"
-    leftover = content_words(value) - content_words(request_text) - _REQUEST_WORDS
+    leftover = _leftover(value, request_text)
     if not leftover:
-        return "it only restates the request, it doesn't say WHY"
+        return _RESTATES
     user_words = set().union(*(content_words(t) for t in user_texts))
     found = sum(1 for w in leftover if _in_user_words(w, user_words))
     if found / len(leftover) < MIN_OVERLAP:

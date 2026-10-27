@@ -5,3 +5,5 @@ pytest
 a2a-sdk[http-server]==1.1.5
 uvicorn==0.40.0
 pyjwt[crypto]==2.15.0  # 2.5: signed identity between services (Ed25519)
+# Module 3 (MCP). PINNED, like a2a-sdk: 2.x broke 1.x (FastMCP → MCPServer), and 2.x speaks the 2026-07-28 spec.
+mcp==2.2.0

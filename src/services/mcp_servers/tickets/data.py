@@ -42,7 +42,7 @@ TICKETS: dict[str, dict] = {}
 
 
 def reset() -> None:
-    """Back to the seed. Nobody outside can call it: a fresh server process (tests, each eval run) starts clean."""
+    """Back to the seed (tests, each eval run). Nobody outside the server can call it — on purpose."""
     TICKETS.clear()
     TICKETS.update({k: {**v, "comments": [dict(c) for c in v["comments"]]} for k, v in _SEED_TICKETS.items()})
 

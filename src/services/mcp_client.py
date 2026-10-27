@@ -1,142 +1,139 @@
-"""MCP client — HAND-WRITTEN over stdio, stdlib only (lesson 3.2). Lesson 3.3 moves it to the SDK.
+"""MCP client on the official SDK, over Streamable HTTP (lesson 3.3). Lesson 3.2's hand-written stdio client:
+see the git history (commit 3f10cec).
 
-The host side of MCP, in three jobs:
-1. START the server: a child process (stdio transport). It lives as long as this client.
-2. DISCOVER: server/discover (versions, capabilities) + tools/list (what it can do).
-3. TRANSLATE, both ways — the heart of it. MCP does NOT replace function calling:
+The host side of MCP, in three jobs — the same as in 3.2; only the plumbing under them changed:
+1. DISCOVER: server/discover (versions, capabilities, instructions) + tools/list (what it can do).
+2. TRANSLATE, both ways — the heart of it. MCP does NOT replace function calling:
      tools/list   → our Tool objects → the OpenAI tool format the LLM sees (same 3 pieces: name, description, schema)
      LLM tool_call → tools/call on the server → its result back as a tool message
    The LLM never knows a tool is remote. What changed is WHERE the code runs and WHO owns it.
+3. SEPARATE the failures: a business refusal (isError) goes to the LLM; a failure of the SYSTEM (down, timeout,
+   protocol error) is ToolUnavailable, for our code (src/tools/_schema.py).
 
 Identity: the user goes in the request's `_meta`, written HERE from the Session — never as a tool argument,
-so the LLM can't fill it in (decision D4, now across a process boundary).
+so the LLM can't fill it in (decision D4, now across a network boundary).
 
-Demo:  python -m src.services.mcp_client
+Sync facade over an async SDK — like a2a_client.py, and for the same reason: our agent loop is synchronous.
+Each call runs in its own event loop (asyncio.run) with its own Client. That works because 2026-07-28 HTTP is
+STATELESS: a request is one POST, there is no connection or session to keep alive between calls. (Over stdio
+it wouldn't: the server process and the pipes ARE the connection, bound to the loop that started them.)
+Cost (measured on WSL): ~50 ms per call, almost all of it building a new httpx client; the tool's own work
+on the server is ~1.5 ms. Reusing one client saves only ~4 ms — not worth a loop kept alive in a thread.
+
+Demo (MCP servers running):  python -m src.services.mcp_client
 """
 
+import asyncio
 import json
-import subprocess
+from collections.abc import Coroutine, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from itertools import count
+from typing import Any
+
+import mcp_types as types
+from mcp import Client
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from src.auth import Session
-from src.tools._schema import Tool, definition
+from src.tools import merge
+from src.tools._schema import Tool, ToolUnavailable, definition
 
-# The CONTRACT, written on both sides (the server has its own copy): importing the server's module here would load
-# its code and data into OUR process — exactly what the protocol boundary is for. Both sides must agree, like
-# pinning the a2a-sdk version on both sides in module 2; a mismatch fails loudly (version error, tests).
-PROTOCOL_VERSION = "2026-07-28"
+# The CONTRACT, written on both sides (the servers have their own copy): importing the servers' module here
+# would load their code and data into OUR process — exactly what the protocol boundary is for.
 USER_KEY = "com.company/user"
 FROM_USER_KEY = "com.company/fromUser"
-CLIENT_INFO = {"name": "service-desk", "version": "0.1.0"}
+CLIENT_INFO = types.Implementation(name="service-desk", version="0.2.0")
+TIMEOUT_SECONDS = 15  # lesson 3.2's readline() waited forever: a hung server hung the whole desk
 
 
-class MCPError(Exception):
-    """A JSON-RPC error from the server: something for OUR code to fix (not something the LLM can react to)."""
-
-    def __init__(self, code: int, message: str):
-        super().__init__(f"MCP error {code}: {message}")
-        self.code = code
+def _root(e: BaseException) -> BaseException:
+    """The SDK runs on task groups: a refused connection arrives wrapped in an ExceptionGroup. Unwrap it."""
+    while isinstance(e, BaseExceptionGroup) and len(e.exceptions) == 1:
+        e = e.exceptions[0]
+    return e
 
 
 class MCPClient:
-    def __init__(self, command: list[str]):
-        # stderr is inherited: the server's logs and tracebacks show up in our terminal, stdout is the protocol.
-        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                        encoding="utf-8", bufsize=1)
-        self._ids = count(1)
-        self.server = self._request("server/discover")
-        self._tools: list[dict] | None = None
+    def __init__(self, name: str, url: str, timeout: float = TIMEOUT_SECONDS):
+        self.name, self.url, self.timeout = name, url, timeout
+        self._mode = "auto"  # first contact: probe server/discover, fall back to the old handshake (initialize)
+        self.protocol_version, self.instructions, self._tools = self._sync(self._discover())
+        # From now on, adopt the negotiated version directly: no probe per call. A handshake-era server (2025-11-25)
+        # would need its initialize on EVERY call (that's what "stateful protocol" costs a stateless client).
+        self._mode = self.protocol_version if self.protocol_version in MODERN_PROTOCOL_VERSIONS else "legacy"
+
+    def _client(self) -> Client:
+        return Client(self.url, mode=self._mode, client_info=CLIENT_INFO, read_timeout_seconds=self.timeout)
+
+    def _sync(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        try:
+            return asyncio.run(coroutine)
+        except Exception as e:  # noqa: BLE001 — business refusals come back as RESULTS; any exception is the system's
+            raise ToolUnavailable(f"The '{self.name}' system is unavailable ({_root(e)!r})") from e
+
+    async def _discover(self) -> tuple[str, str | None, list[types.Tool]]:
+        async with self._client() as client:
+            tools, cursor = [], None
+            while True:  # tools/list is paginated: a big server answers in pages
+                page = await client.list_tools(cursor=cursor)
+                tools += page.tools
+                if not (cursor := page.next_cursor):
+                    break
+            return client.protocol_version, client.instructions, tools
 
     # --- Protocol --------------------------------------------------------------------------------
 
-    def _request(self, method: str, params: dict | None = None, session: Session | None = None) -> dict:
-        """One request, one response. One at a time: the desk is synchronous, so no two calls share the pipe."""
-        # Stateless revision: every request says which version it speaks and what the client supports.
-        meta = {
-            "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-            "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
-            "io.modelcontextprotocol/clientCapabilities": {},  # no elicitation, sampling... yet (lesson 3.4)
-        }
-        if session:
-            meta[USER_KEY] = session.email
-        request_id = next(self._ids)
-        message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": {**(params or {}), "_meta": meta}}
-        assert self.process.stdin and self.process.stdout
-        self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-        self.process.stdin.flush()
-        line = self.process.stdout.readline()  # ⚠️ no timeout: a hung server hangs us too (the SDK has one)
-        if not line:
-            raise MCPError(-1, f"server exited (code {self.process.poll()})")
-        response = json.loads(line)
-        assert response.get("id") == request_id  # one at a time, so the next line IS our answer
-        if "error" in response:
-            raise MCPError(response["error"]["code"], response["error"]["message"])
-        return response["result"]
+    def call_tool(self, name: str, arguments: dict, session: Session) -> types.CallToolResult:
+        async def call() -> types.CallToolResult:
+            async with self._client() as client:
+                return await client.call_tool(name, arguments, meta={USER_KEY: session.email})
 
-    def list_tools(self) -> list[dict]:
-        # Cached: the list only changes with a new server version. (Real servers say how long to cache it,
-        # or notify `list_changed`; a new conversation reading a stale list is the price.)
-        tools = self._tools
-        if tools is None:
-            tools = self._tools = self._request("tools/list")["tools"]
-        return tools
-
-    def call_tool(self, name: str, arguments: dict, session: Session) -> dict:
-        return self._request("tools/call", {"name": name, "arguments": arguments}, session)
+        return self._sync(call())
 
     # --- Translation to OUR tool registry ----------------------------------------------------------
 
     def tools(self) -> dict[str, Tool]:
-        """The server's tools as Tool objects, ready for run_tool: the agent loop needs no change at all."""
+        """The server's tools as Tool objects, ready for run_tool: the agent loop needs no change at all.
+        Cached since discovery (startup): a tool the server adds later appears on the next start."""
         return {
-            t["name"]: Tool(
-                definition(t["name"], t["description"], t["inputSchema"]),
-                partial(self._run, t["name"]),
+            t.name: Tool(
+                definition(t.name, t.description or "", t.input_schema),
+                partial(self._run, t.name),  # a PROXY: same interface as a local function, a tools/call inside
                 # The server DECLARES which arguments must be the user's words; WE enforce it (run_tool), because
                 # only the host has the conversation. ⚠️ We trust the server's declaration — and the server
                 # trusts us to apply it. Another host (e.g. an IDE) may not.
-                from_user=tuple(t.get("_meta", {}).get(FROM_USER_KEY, ())),
+                from_user=tuple((t.meta or {}).get(FROM_USER_KEY, ())),
             )
-            for t in self.list_tools()
+            for t in self._tools
         }
 
     def _run(self, name: str, session: Session, **arguments) -> object:
         result = self.call_tool(name, arguments, session)
-        text = "\n".join(c["text"] for c in result["content"] if c["type"] == "text")
-        if result.get("isError"):
+        text = "\n".join(c.text for c in result.content if isinstance(c, types.TextContent))
+        if result.is_error:
             raise ValueError(text)  # run_tool turns it into "Error: ..." for the LLM, like a local tool
-        return result.get("structuredContent", text)
+        return result.structured_content if result.structured_content is not None else text
 
-    def close(self) -> None:
-        """Closing stdin = EOF for the server: its loop ends and the process exits."""
-        if self.process.poll() is None:
-            assert self.process.stdin
-            self.process.stdin.close()
-            self.process.wait(timeout=5)
 
-    def __enter__(self) -> "MCPClient":
-        return self
-
-    def __exit__(self, *_) -> None:
-        self.close()
+def connect(urls: Mapping[str, str]) -> dict[str, Tool]:
+    """Discovers every system and merges their tools into ONE registry (a duplicated name fails: see merge).
+    In parallel (one thread each, each with its own event loop): startup waits for the slowest server, not the sum."""
+    with ThreadPoolExecutor() as pool:
+        clients = list(pool.map(MCPClient, urls, urls.values()))
+    return merge({client.name: client.tools() for client in clients})
 
 
 if __name__ == "__main__":
-    # Watch the protocol: what the host sends, what the server answers, and what the LLM ends up seeing.
     from src.auth import session_for
-    from src.config import TICKETS_MCP_COMMAND
+    from src.config import MCP_SERVERS
 
-    with MCPClient(TICKETS_MCP_COMMAND) as client:
-        print("server/discover →", json.dumps(client.server, indent=2), "\n")
-        print("tools/list →", [t["name"] for t in client.list_tools()], "\n")
-        print("What the LLM sees (function calling):", json.dumps(client.tools()["escalate_ticket"].definition,
-                                                                indent=2), "\n")
-        ana = session_for("ana@company.com")
-        print("tools/call list_my_tickets as ana →", json.dumps(client.call_tool("list_my_tickets", {}, ana)), "\n")
-        print("tools/call escalate_ticket INC0002 as ana (joão's ticket) →",
-              json.dumps(client.call_tool("escalate_ticket", {"ticket_id": "INC0002"}, ana)), "\n")
-        try:
-            client._request("tools/call", {"name": "list_my_tickets", "arguments": {}})  # no user in _meta
-        except MCPError as e:
-            print("tools/call without a user →", e)
+    ana = session_for("ana@company.com")
+    tickets = MCPClient("tickets", MCP_SERVERS["tickets"])
+    print("negotiated version →", tickets.protocol_version, "| instructions →", tickets.instructions, "\n")
+    print("What the LLM sees (function calling):",
+          json.dumps(tickets.tools()["escalate_ticket"].definition, indent=2), "\n")
+    print("tools/call list_my_tickets as ana →",
+          tickets.call_tool("list_my_tickets", {}, ana).model_dump(by_alias=True, exclude_none=True), "\n")
+    print("tools/call escalate_ticket(INC0002) as ana (not hers) →",
+          tickets.call_tool("escalate_ticket", {"ticket_id": "INC0002"}, ana).model_dump(by_alias=True,
+                                                                                        exclude_none=True))

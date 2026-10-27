@@ -9,18 +9,29 @@ One tool with an OPTIONAL justification would run the provenance check even when
 
 Every policy is enforced here, whatever the LLM decided: blocked software, contractors, laptop age (KB012),
 duplicates. The approval itself is human (decision D2) — another flow (module 4).
+
+⚠️ Server boundary (module 3): the laptop rule needs the user's devices, which belong to the CMDB (assets server).
+Here the catalog IMPORTS the CMDB's data — the "shared database" shortcut: it only works because, in dev, both
+servers share one process and the seed. Deployed separately, the catalog would read a stale copy. The real
+options: ask the CMDB through ITS API (server-to-server, with the catalog's own identity), or keep an
+eligibility field in sync from CMDB events. Owning data means others ask you; they don't read your tables.
 """
 
-from src import data
+from src import data  # the company directory (shared): contractor? manager?
+from src.services.mcp_servers.assets import data as cmdb  # ⚠️ ANOTHER system's data — see the note above
+from src.services.mcp_servers.catalog import data as catalog_db  # this system's own data
 from src.auth import Session
+from src.services.mcp_servers.assets.tools import REPLACEMENT_AGE_YEARS, replacement_eligible
 from src.tools._schema import NO_ARGS, Tool, definition
-from src.tools.assets import REPLACEMENT_AGE_YEARS, replacement_eligible
+from src.tools.provenance import restated
+
+INSTRUCTIONS = "The service catalog: software and equipment requests (pre-approved, manager approval, blocked)."
 
 LAPTOP_REPLACEMENT = "HW004"
 
 
 def _item(item_id: str) -> dict:
-    item = data.CATALOG.get(item_id.upper())
+    item = catalog_db.CATALOG.get(item_id.upper())
     if item is None:
         raise ValueError(f"Catalog item {item_id} not found. Use search_catalog to find the right id.")
     if item["approval"] == "blocked":
@@ -29,31 +40,26 @@ def _item(item_id: str) -> dict:
 
 
 def _check_not_duplicate(session: Session, item_id: str) -> None:
-    for rid, r in data.CATALOG_REQUESTS.items():
+    for rid, r in catalog_db.CATALOG_REQUESTS.items():
         if r["email"] == session.email and r["item"] == item_id.upper() and r["status"] != "rejected":
             raise ValueError(f"The user already requested this item: {rid} ({r['status']}).")
 
 
 def _register(session: Session, item_id: str, status: str, **extra) -> dict:
-    request_id = f"RITM{len(data.CATALOG_REQUESTS) + 1:04d}"
-    data.CATALOG_REQUESTS[request_id] = {"email": session.email, "item": item_id.upper(), "status": status, **extra}
-    return {"request": request_id, "item": data.CATALOG[item_id.upper()]["name"], "status": status, **extra}
-
-
-def _item_text(arguments: dict) -> str:
-    item = data.CATALOG.get(str(arguments.get("item_id", "")).upper())
-    return f"{item['name']} {item['type']}" if item else ""
+    request_id = f"RITM{len(catalog_db.CATALOG_REQUESTS) + 1:04d}"
+    catalog_db.CATALOG_REQUESTS[request_id] = {"email": session.email, "item": item_id.upper(), "status": status, **extra}
+    return {"request": request_id, "item": catalog_db.CATALOG[item_id.upper()]["name"], "status": status, **extra}
 
 
 def search_catalog(session: Session, query: str) -> list[dict]:
     words = [w for w in query.lower().split() if len(w) > 2]
     matches = [
         {"item_id": iid, **item}
-        for iid, item in data.CATALOG.items()
+        for iid, item in catalog_db.CATALOG.items()
         if any(w in f"{item['name']} {item['type']} {item['description']}".lower() for w in words)
     ]
     if not matches:
-        raise ValueError(f"No catalog item matches '{query}'. Items: {', '.join(i['name'] for i in data.CATALOG.values())}.")
+        raise ValueError(f"No catalog item matches '{query}'. Items: {', '.join(i['name'] for i in catalog_db.CATALOG.values())}.")
     return matches
 
 
@@ -71,12 +77,19 @@ def request_catalog_approval(session: Session, item_id: str, justification: str)
     item = _item(item_id)
     if item["approval"] == "pre_approved":
         raise ValueError(f"{item['name']} is pre-approved: use order_catalog_item (no justification needed).")
+    # Half of the provenance check lives HERE because only the catalog knows what "SW004" is. Found in the eval
+    # (case 42): "Solicito Adobe Acrobat Pro." passed as a justification — the only other argument was the opaque
+    # id. Module 1 fixed it in the HOST with a callback (describe_request); in module 3 it broke again: a Python
+    # function in the host's Tool doesn't cross the protocol (tools/list carries name, description, schema, _meta).
+    # The other half — "are these the user's own words?" — needs the conversation: it stays in the host (from_user).
+    if problem := restated("justification", justification, f"{item['name']} {item['type']}"):
+        raise ValueError(problem)
     user = data.USERS[session.email]
     if user["employment"] == "contractor":
         raise ValueError("Contractors can only order pre-approved items. The contracting manager must request "
                          "licensed software or equipment for them.")
     if item_id.upper() == LAPTOP_REPLACEMENT and not any(
-        replacement_eligible(d) for d in data.DEVICES.values() if d["owner"] == session.email
+        replacement_eligible(d) for d in cmdb.DEVICES.values() if d["owner"] == session.email
     ):
         raise ValueError(f"None of the user's laptops is eligible for replacement (policy: {REPLACEMENT_AGE_YEARS}+ "
                          "years old, KB012). A laptop with a hardware failure needs a Hardware ticket first.")
@@ -87,8 +100,8 @@ def request_catalog_approval(session: Session, item_id: str, justification: str)
 
 def list_my_catalog_requests(session: Session) -> list[dict]:
     return [
-        {"request": rid, "item": data.CATALOG[r["item"]]["name"], "status": r["status"]}
-        for rid, r in data.CATALOG_REQUESTS.items() if r["email"] == session.email
+        {"request": rid, "item": catalog_db.CATALOG[r["item"]]["name"], "status": r["status"]}
+        for rid, r in catalog_db.CATALOG_REQUESTS.items() if r["email"] == session.email
     ]
 
 
@@ -121,9 +134,7 @@ TOOLS = [
             "properties": {**_ITEM_ID, "justification": {"type": "string"}},
             "required": ["item_id", "justification"],
         },
-    # Found in the eval (case 42): "Solicito Adobe Acrobat Pro." passed as a justification — the only other
-    # argument was "SW004", so provenance couldn't tell that "Adobe Acrobat Pro" was the REQUEST, not a reason.
-    ), request_catalog_approval, from_user=("justification",), describe_request=_item_text),
+    ), request_catalog_approval, from_user=("justification",)),
     Tool(definition(
         "list_my_catalog_requests", "Lists the logged-in user's software/equipment requests and their status.",
         NO_ARGS,

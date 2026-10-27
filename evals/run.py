@@ -1,8 +1,8 @@
 """Runs the eval against the current Service Desk (a regression suite since module 2) and saves the results.
 
-The IAM team's Access agent is started here, in a thread on a free port — so the eval needs nothing else
-running, and can reset its data between runs too. The tickets MCP server is a child process: a FRESH one per run
-is how its data starts clean (nobody outside the server can reset it — on purpose). Past modules' numbers: notes/SUMMARY.md and the module branches.
+The IAM team's Access agent and the five MCP servers (the company's systems) are started here, in threads on
+free ports — so the eval needs nothing else running, and can reset their data between runs too (only because
+they run in OUR process: nobody outside a server can reset it — on purpose). Past modules' numbers: notes/SUMMARY.md and the module branches.
 
 Usage (venv active):
     python -m evals.run                         # all cases, 3 runs each
@@ -19,32 +19,32 @@ from statistics import fmean
 import openai
 
 from evals.cases import CASES, Case, RunResult
-from src import data
 from src.architectures import service_desk
 from src.auth import session_for
-from src.config import TICKETS_MCP_COMMAND
+from src.config import mcp_urls
+from src.services import mcp_client
 from src.services.a2a_client import A2AClient
 from src.services.access_a2a import data as iam_data
 from src.services.access_a2a.agent import access_agent_for
 from src.services.access_a2a.server import AccessExecutor, start
-from src.services.mcp_client import MCPClient
+from src.services.mcp_servers import server as mcp_servers
+from src.tools._schema import Tool
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
-def run_case(case: Case, access: AccessExecutor, client: A2AClient) -> RunResult:
-    data.reset()  # every run starts from the same data — ours...
-    iam_data.reset()  # ...the IAM team's...
-    with MCPClient(
-        TICKETS_MCP_COMMAND
-    ) as tickets:  # ...and the ticketing system's (a new server process)
-        desk = service_desk(
-            session_for(case.user), tickets, False, client
-        )  # the case's user is already logged in
-        # The remote agent's LLM bill is the IAM team's; we add it to ours to compare with module 1 (all in-process).
-        remote_calls, remote_cost = access.usage.calls, access.cost()
-        start = time.perf_counter()
-        replies = [desk.reply(turn) for turn in case.turns]
+def run_case(
+    case: Case, access: AccessExecutor, client: A2AClient, tools: dict[str, Tool]
+) -> RunResult:
+    mcp_servers.reset()  # every run starts from the same data — the company's systems'...
+    iam_data.reset()  # ...and the IAM team's
+    desk = service_desk(
+        session_for(case.user), tools, False, client
+    )  # the case's user is already logged in
+    # The remote agent's LLM bill is the IAM team's; we add it to ours to compare with module 1 (all in-process).
+    remote_calls, remote_cost = access.usage.calls, access.cost()
+    start = time.perf_counter()
+    replies = [desk.reply(turn) for turn in case.turns]
     return RunResult(
         replies=replies,
         tool_calls=desk.tool_calls,
@@ -55,13 +55,17 @@ def run_case(case: Case, access: AccessExecutor, client: A2AClient) -> RunResult
 
 
 def run_case_with_retry(
-    case: Case, access: AccessExecutor, client: A2AClient, attempts: int = 3
+    case: Case,
+    access: AccessExecutor,
+    client: A2AClient,
+    tools: dict[str, Tool],
+    attempts: int = 3,
 ) -> RunResult:
     """A network blip or a 5xx/429 from the API says nothing about the agent: retry the whole run (from clean
     data) instead of crashing the eval. Any other exception still crashes on purpose — that's a bug."""
     for attempt in range(1, attempts + 1):
         try:
-            return run_case(case, access, client)
+            return run_case(case, access, client, tools)
         except (
             openai.APIConnectionError,
             openai.APITimeoutError,
@@ -96,15 +100,20 @@ def main() -> None:
     )
     _, url = start(access)
     client = A2AClient(url)  # discover once for the whole eval
+    _, mcp_url = mcp_servers.start()
+    tools = mcp_client.connect(mcp_urls(mcp_url))  # also once
     print(
-        f"Service Desk (hub + Access via A2A at {url} + tickets via MCP/stdio) | {len(cases)} cases x {args.runs} runs\n"
+        f"Service Desk (hub + Access via A2A at {url} + 5 systems via MCP/HTTP at {mcp_url}) | "
+        f"{len(cases)} cases x {args.runs} runs\n"
     )
     print(
         f"{'#':>3}  {'category':<9} {'pass':<6} {'calls':>5} {'cost US$':>9} {'time s':>7}  notes"
     )
 
     for case in cases:
-        runs = [run_case_with_retry(case, access, client) for _ in range(args.runs)]
+        runs = [
+            run_case_with_retry(case, access, client, tools) for _ in range(args.runs)
+        ]
         failures = [[msg for check in case.checks if (msg := check(r))] for r in runs]
         passed = sum(1 for f in failures if not f)
         row = {

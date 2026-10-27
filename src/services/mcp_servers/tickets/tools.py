@@ -12,9 +12,11 @@ from datetime import datetime, timedelta
 
 from src import data  # the company clock (shared infra)
 from src.auth import Session
-from src.services.tickets_mcp import data as itsm  # this system's own data
+from src.services.mcp_servers.tickets import data as itsm  # this system's own data
 from src.tools._schema import NO_ARGS, Tool, definition
 from src.tools.provenance import content_words
+
+INSTRUCTIONS = "The company's ticketing system (ITSM): incidents opened by employees, with SLA and escalation."
 
 _TEAMS = {
     "network": "L2 - Network", "hardware": "L2 - Hardware", "software": "L2 - Applications",
@@ -133,7 +135,7 @@ def escalate_ticket(session: Session, ticket_id: str) -> dict:
 def close_ticket(session: Session, ticket_id: str, resolution: str) -> dict:
     # `resolution` must be the user's own words (from_user below), so an instruction hidden in a ticket comment
     # can't produce it. ⚠️ Since module 3 the check runs in the HOST, not here: this server never sees the
-    # conversation, so it can only DECLARE the rule (server.py) and trust the client to enforce it. A client
+    # conversation, so it can only DECLARE the rule (../server.py) and trust the client to enforce it. A client
     # that ignores the declaration closes tickets on anything. Lesson 3.4 moves it back here (elicitation).
     t = _own_ticket(session, ticket_id)
     if t["status"] == "closed":

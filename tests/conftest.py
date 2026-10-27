@@ -1,14 +1,15 @@
 """Shared test fixtures — no LLM anywhere: a fake Access agent served over real A2A (HTTP on a free port), and
-the real tickets MCP server as a child process (stdio)."""
+the REAL MCP servers of the company's systems over HTTP (in a thread, on a free port)."""
 
 import pytest
 
-from src.config import TICKETS_MCP_COMMAND
+from src.config import mcp_urls
 from src.core.agent import ToolCall, Usage
 from src.services.a2a_client import A2AClient
 from src.services.access_a2a.agent import ASK_USER
 from src.services.access_a2a.server import AccessExecutor, start
-from src.services.mcp_client import MCPClient
+from src.services.mcp_client import connect
+from src.services.mcp_servers import server as mcp_server
 
 
 class FakeAccessAgent:
@@ -47,8 +48,21 @@ def client(service):
     server.should_exit = True  # uvicorn's graceful stop
 
 
-@pytest.fixture
-def tickets():
-    """The REAL ticketing MCP server, fresh for each test (its data lives in its process: a new one starts clean)."""
-    with MCPClient(TICKETS_MCP_COMMAND) as client:
-        yield client
+@pytest.fixture(autouse=True)
+def fresh_systems():
+    """Every system back to its seed before each test. The servers run in THIS process (a thread), so we can."""
+    mcp_server.reset()
+
+
+@pytest.fixture(scope="session")
+def mcp_url():
+    """The five MCP servers, started once for the whole test session. Base URL: <url>/<system>/mcp."""
+    server, url = mcp_server.start()
+    yield url
+    server.should_exit = True
+
+
+@pytest.fixture(scope="session")
+def systems(mcp_url):
+    """Every system's tools, discovered over real MCP/HTTP and merged — what the Service Desk gets at startup."""
+    return connect(mcp_urls(mcp_url))  # the same mapping the chat uses (src/config.py)

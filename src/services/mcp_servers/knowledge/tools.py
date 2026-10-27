@@ -6,14 +6,17 @@ one injection away from leaking them. A public article even points to an interna
 knowing the id is not permission, the same lesson as IDOR on tickets.
 """
 
-from src import data
+from src import data  # the company directory (shared): who is IT staff
+from src.services.mcp_servers.knowledge import data as kb  # this system's own data
 from src.auth import Session
 from src.tools._schema import NO_ARGS, Tool, definition
+
+INSTRUCTIONS = "The IT knowledge base (how-to and troubleshooting articles) and the status page (incidents, maintenance)."
 
 
 def _visible_articles(session: Session) -> list[dict]:
     it_staff = data.USERS[session.email]["department"] == "IT"
-    return [a for a in data.KB_ARTICLES if a["visibility"] == "public" or it_staff]
+    return [a for a in kb.KB_ARTICLES if a["visibility"] == "public" or it_staff]
 
 
 def search_knowledge_base(session: Session, query: str) -> list[dict]:
@@ -38,17 +41,17 @@ def get_kb_article(session: Session, article_id: str) -> dict:
 
 
 def check_system_status(session: Session, system: str) -> dict:
-    status = data.SYSTEM_STATUS.get(system.lower())
+    status = kb.SYSTEM_STATUS.get(system.lower())
     if status is None:
-        raise ValueError(f"Unknown system '{system}'. Known: {', '.join(data.SYSTEM_STATUS)}.")
+        raise ValueError(f"Unknown system '{system}'. Known: {', '.join(kb.SYSTEM_STATUS)}.")
     return {"system": system.lower(), **status}
 
 
 def list_active_incidents(session: Session) -> dict:
     return {
-        "incidents": [{"system": name, **s} for name, s in data.SYSTEM_STATUS.items() if s["status"] != "operational"],
+        "incidents": [{"system": name, **s} for name, s in kb.SYSTEM_STATUS.items() if s["status"] != "operational"],
         "scheduled_maintenance": [
-            {"system": name, **s["maintenance"]} for name, s in data.SYSTEM_STATUS.items() if "maintenance" in s
+            {"system": name, **s["maintenance"]} for name, s in kb.SYSTEM_STATUS.items() if "maintenance" in s
         ],
     }
 
@@ -79,7 +82,7 @@ TOOLS = [
         "Checks whether ONE corporate system has an ongoing incident (outage or slowness) or scheduled maintenance.",
         {
             "type": "object",
-            "properties": {"system": {"type": "string", "enum": list(data.SYSTEM_STATUS)}},
+            "properties": {"system": {"type": "string", "enum": list(kb.SYSTEM_STATUS)}},
             "required": ["system"],
         },
     ), check_system_status),

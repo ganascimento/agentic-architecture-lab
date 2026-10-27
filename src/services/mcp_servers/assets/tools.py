@@ -8,9 +8,12 @@ notifications (module 3). Here it answers at once.
 
 from datetime import datetime
 
-from src import data
+from src import data  # the company clock (shared)
+from src.services.mcp_servers.assets import data as cmdb  # this system's own data
 from src.auth import Session
 from src.tools._schema import NO_ARGS, Tool, definition
+
+INSTRUCTIONS = "IT assets (CMDB): the devices assigned to each user and a remote diagnostic for laptops."
 
 REPLACEMENT_AGE_YEARS = 4  # KB012
 
@@ -33,7 +36,7 @@ def replacement_eligible(device: dict) -> bool:
 
 
 def _own_device(session: Session, asset_id: str) -> dict:
-    device = data.DEVICES.get(asset_id.upper())
+    device = cmdb.DEVICES.get(asset_id.upper())
     if device is None or device["owner"] != session.email:
         raise ValueError(f"Device {asset_id} not found among your devices.")
     return device
@@ -43,7 +46,7 @@ def list_my_devices(session: Session) -> list[dict]:
     return [
         {"asset_id": aid, "type": d["type"], "model": d["model"], "purchased": d["purchased"],
          "in_warranty": in_warranty(d)}
-        for aid, d in data.DEVICES.items() if d["owner"] == session.email
+        for aid, d in cmdb.DEVICES.items() if d["owner"] == session.email
     ]
 
 

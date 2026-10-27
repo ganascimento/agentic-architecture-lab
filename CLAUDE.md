@@ -49,17 +49,19 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
 - Python 3.12, `.venv`. LLM: OpenAI (`openai`, Chat Completions), modelo por papel em `src/config.py`:
   **`gpt-6-luna`** com `reasoning_effort="none"` (no Chat Completions a Luna só faz tool calling com `none`).
   (gpt-4o-mini, classificador do módulo 1, é MAIS caro por token que a Luna.)
-- Envs: `OPENAI_API_KEY` (no `.env`, nunca commitar), `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `ACCESS_AGENT_URL`.
-- Rodar (venv ativo), dois terminais: `python -m src.services.access_a2a` (Acessos, time de IAM) e `python -m src`
-  (Service Desk; login ana/ana123 etc. em `src/data.py`; sobe sozinho o servidor MCP de tickets, processo filho via
-  stdio). `python -m pytest -q` (sem LLM) · `python -m evals.run [--case ...] [--runs N]` (sobe o serviço A2A e um
-  servidor MCP NOVO por run = dado limpo) · ver o protocolo MCP: `python -m src.services.mcp_client`.
+- Envs: `OPENAI_API_KEY` (no `.env`, nunca commitar), `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `ACCESS_AGENT_URL`,
+  `MCP_BASE_URL`.
+- Rodar (venv ativo), três terminais: `python -m src.services.access_a2a` (Acessos, time de IAM, :8001),
+  `python -m src.services.mcp_servers` (os 5 sistemas como servidores MCP HTTP, :8002/<sistema>/mcp) e `python -m src`
+  (Service Desk; login ana/ana123 etc. em `src/data.py`). `python -m pytest -q` (sem LLM) ·
+  `python -m evals.run [--case ...] [--runs N]` (sobe A2A + MCP em threads; reseta o dado de cada sistema por run) ·
+  demo do cliente MCP (servidores no ar): `python -m src.services.mcp_client`.
 - **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (50 × 3, ~US$ 0,10) só nos marcos.
 - Módulo 1 sem framework (de propósito). Módulo 2: `a2a-sdk[http-server]==1.1.5`, `uvicorn`, `pyjwt[crypto]` —
   versões FIXADAS (os dois lados do protocolo precisam concordar). Chave Ed25519 do Service Desk em `.keys/`
-  (gerada no 1º uso, git-ignored). Módulo 3 (3.2): MCP à mão, só stdlib, spec **`2026-07-28`** (stateless: sem
-  `initialize`/sessão, `_meta` por request; tasks viraram extensão; elicitation via MRTR). SDK `mcp` na 3.3 (checar
-  suporte à 2026-07-28; muitos clientes ainda em 2025-11-25). LangGraph entra no módulo 4.
+  (gerada no 1º uso, git-ignored). Módulo 3: spec **`2026-07-28`** (stateless: sem
+  `initialize`/sessão, `_meta` por request; tasks viraram extensão; elicitation via MRTR). 3.2 à mão (stdio, stdlib:
+  commit `3f10cec`); 3.3 SDK `mcp==2.2.0` FIXADO, Streamable HTTP (serve também clientes 2025-11-25). LangGraph: módulo 4.
   Demais dependências: no módulo em que aparecem.
 - Docker disponível para serviços auxiliares (vector DB, observabilidade etc.).
 - Push pelo WSL falha (askpass antigo do VS Code): usar `"/mnt/c/Program Files/Git/cmd/git.exe" push`.
@@ -83,24 +85,26 @@ src/
   __main__.py              # chat no terminal: login + Service Desk
   config.py  auth.py       # modelos/preços · login local → Session (identidade vem daqui, nunca do chat)
   identity.py              # token delegado ASSINADO p/ outros serviços (iss=service-desk, sub=usuário, aud, exp 60s)
-  data.py                  # "sistemas" fake: contas/diretório, KB (pública + interna), status/incidentes,
-                           # dispositivos (CMDB), catálogo. Relógio FIXO (`NOW`). Tickets NÃO (são do servidor MCP)
+  data.py                  # infra compartilhada: relógio FIXO (`NOW`), contas de login, diretório (USERS). O resto
+                           # mora no servidor dono (mcp_servers/*/data.py, access_a2a/data.py)
   core/agent.py            # loop genérico (Agent, ToolCall, Usage); gancho `intercept`; `registry` de tools
-  tools/                   # sistemas LOCAIS (function calling): knowledge account assets catalog + _schema (Tool;
-                           # sem import da OpenAI em runtime) + provenance + run_tool. Sem tools de acesso/tickets.
+  tools/                   # maquinaria do HOST (nenhum sistema local): _schema (Tool, ToolUnavailable; sem import
+                           # da OpenAI em runtime) · provenance · run_tool (allowlist, proveniência; falha de sistema
+                           # SOBE, não vira texto p/ o LLM) · merge (nome repetido entre servidores = erro)
   architectures/           # service_desk() = HUB: handoff (grafo, triagem-agente) · specialists (Suporte, Conta,
                            # Catálogo) · remote (RemoteAgent: nó do grafo = agente de outro time via A2A, sem LLM)
   services/                # sistemas/agentes de OUTROS donos, fora do nosso processo
     a2a_client.py          # cliente A2A no SDK (descoberta + envio com streaming + GetTask), fachada síncrona
-    mcp_client.py          # cliente MCP À MÃO (stdio): sobe o servidor, discover/list/call, traduz p/ Tool;
-                           # usuário no `_meta` (com.company/user), nunca nos argumentos
-    tickets_mcp/           # sistema de tickets (ITSM) como servidor MCP À MÃO: server (JSON-RPC: server/discover,
-                           # tools/list, tools/call) · tools (regras: SLA, duplicado, IDOR…) · data (TICKETS)
+    mcp_client.py          # cliente MCP no SDK (HTTP), fachada síncrona (asyncio.run por chamada: HTTP stateless);
+                           # discover 1x, traduz tools/list → Tool (proxy); usuário no `_meta`; connect() = merge
+    mcp_servers/           # os sistemas da empresa como servidores MCP: server.py (SDK low-level: adaptador genérico
+                           # Tool → servidor, identidade do `_meta`, 5 apps montados em 1 porta) + 1 pacote por
+                           # sistema (tickets knowledge account assets catalog), cada um com tools.py + data.py
     access_a2a/            # time de IAM: server (SDK: AccessExecutor, card c/ security scheme) · auth (verifica o
                            # token: 401 antes do protocolo) · agent (ACCESS_ROLE + ask_user) · tools · data
-tests/                     # sem LLM: tools, auth, a2a, mcp, architectures (A2A falso + servidor MCP REAL em conftest)
-evals/                     # cases.py (50 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe o
-                           # serviço; custo/chamadas = nosso + remoto), results/ (fora do git: gerado a cada run)
+tests/                     # sem LLM: tools, auth, a2a, mcp (HTTP real + fio cru + cliente 2025-11-25), architectures
+evals/                     # cases.py (50 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe A2A +
+                           # MCP; custo/chamadas = nosso + remoto), results/ (fora do git: gerado a cada run)
 ```
 
 ## Organização por módulo
@@ -117,7 +121,17 @@ evals/                     # cases.py (50 casos; acesso checado pelo artifact A2
 
 Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md` e o histórico do git.
 
-- **Módulo atual:** 3 — MCP (Model Context Protocol). 3.1 teoria · 3.2 MCP à mão (fechada 2026-10-02). Em andamento: 3.3 SDK.
+- **Módulo atual:** 3 — MCP (Model Context Protocol). 3.1 teoria · 3.2 MCP à mão (fechada 2026-10-02) · 3.3 SDK + HTTP
+  (2026-10-02, **não commitada; aluno revisa**). Próximo: 3.4 resources/elicitation/progress.
+  - **3.3 (pedido do aluno: HTTP já, para TODOS os sistemas — foco é MCP corporativo):** 5 servidores MCP (tickets,
+    knowledge, account, assets, catalog) no SDK low-level, Streamable HTTP, 1 processo/porta em dev (`:8002/<sis>/mcp`),
+    cada pacote com tools.py + data.py; `src/tools` virou só maquinaria do host; cliente = fachada síncrona
+    (`asyncio.run` por chamada: HTTP stateless). Achados: (d) timeout ✅; (e) `merge` falha em nome repetido ✅;
+    (f) `ToolUnavailable` sobe do `run_tool` ✅; (g) catálogo LÊ o dado do CMDB (banco compartilhado) → registrar;
+    (h) regressão do caso 42: `describe_request` (callback no host) não atravessa o protocolo → metade da regra no
+    servidor (`provenance.restated`); caso misto fica `xfail` → elicitation (3.4); (c) virou falha real em HTTP (bind
+    127.0.0.1; token → 3.5). Import do servidor ~2,6 s (peso do SDK). Testes 94 (+2 xfail). Eval 50×1 = 96%, 4,7
+    chamadas, 5,8 s, US$ 0,03; caso 42 pós-correção 2/3.
   - **3.2 (fechada):** tickets saíram de `src/tools` → `services/tickets_mcp` (servidor stdio, dono
     do dado: TICKETS vive no PROCESSO do servidor; `/state` não mostra mais). Cliente à mão traduz tools/list → Tool;
     o hub faz `REGISTRY | tickets.tools()` (allowlist do SPECS continua valendo: tool nova do servidor não chega a
@@ -159,15 +173,15 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
 
 ## Pendências encaminhadas (retomar no módulo indicado)
 
-- **Módulo 3 (MCP):** próximos: 3.3 SDK oficial (fachada síncrona, como o `a2a_client`; timeout; achados e/f) +
-  demais servidores (knowledge, account, assets, catalog);
-  3.4 resources/elicitation/progress; 3.5 identidade + fronteiras + comparação final; comparar MCP × A2A × function calling na prática. Ganchos já no domínio: KB/incidentes como
+- **Módulo 3 (MCP):** próximos: 3.4 resources/elicitation/progress (elicitation fecha o `xfail` do caso 42 e o
+  `force_new`; progress pede SSE no lugar de `json_response`); 3.5 identidade + fronteiras + comparação final; comparar MCP × A2A × function calling na prática. Ganchos já no domínio: KB/incidentes como
   **resources** (tool × resource), `force_new` (confirmação por flag do LLM) × **elicitation**, diagnóstico como
-  operação lenta → **progress**, fronteira de servidor por sistema (quem é dono de qual dado), 18 tools → custo de
+  operação lenta → **progress**, catálogo lendo o dado do CMDB (achado g: API servidor→servidor), 18 tools → custo de
   contexto/seleção de tools, identidade do usuário no servidor MCP (D4/D10 de novo).
 - **Módulo 4 (LangGraph):** **supervisor** (agent-as-tool + síntese), comparar "à mão × framework"; human-in-the-loop
   para a aprovação da D2 (a task de acesso termina em `pending_approval`; aprovar é outro fluxo).
-- **Módulo 5 (Registry):** `AgentSpec` + grafo do handoff quase declarativos; unificar "o que cada agente trata";
+- **Módulo 5 (Registry):** `AgentSpec` + grafo do handoff quase declarativos; **gateway MCP** (agrega os servidores,
+  namespace `mcp__<servidor>__<tool>`, allowlist central, roteia pelos headers `Mcp-Method`/`Mcp-Name`); unificar "o que cada agente trata";
   **contrato do dado estruturado** do artifact (`accessRequest` não está descrito no card → schema/extensão
   versionada); catálogo/descoberta quando houver muitos agentes remotos; Extended Agent Card.
 - **Módulo 6 (Segurança):** injeção indireta em comentário de terceiro (INC0003, caso 40 — hoje só a proveniência

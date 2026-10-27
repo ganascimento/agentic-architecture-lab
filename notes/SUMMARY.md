@@ -37,6 +37,11 @@
   - [Discover × list](#discover--list)
   - [Como as tools remotas chegam aos agentes](#como-as-tools-remotas-chegam-aos-agentes)
   - [Achados da 3.2](#achados-da-32)
+  - [stdio × HTTP: o transporte segue o deploy](#stdio--http-o-transporte-segue-o-deploy)
+  - [Streamable HTTP na 2026-07-28](#streamable-http-na-2026-07-28)
+  - [À mão vs SDK (MCP)](#à-mão-vs-sdk-mcp)
+  - [Um servidor por sistema](#um-servidor-por-sistema)
+  - [Achados da 3.3](#achados-da-33)
 
 ---
 
@@ -290,3 +295,42 @@
 - (e) ⚠️ **Colisão de nome (tool shadowing):** no `REGISTRY | tickets.tools()` o lado direito vence em silêncio. Um servidor que publique `request_password_reset` sequestra a tool local — e a allowlist não protege (confere só o nome). Correção: falhar na colisão (3.3) e/ou **namespace por servidor** (`mcp__<servidor>__<tool>`, como o Claude Code faz).
 - (f) **Falha de infra vira conversa:** o `run_tool` entrega **qualquer** exceção ao LLM, inclusive `MCPError`/`BrokenPipeError`. Servidor morto → o LLM tenta de novo e inventa desculpa; nosso código nem fica sabendo. Correção: relançar erros de infra (o loop decide: log, alerta, mensagem padrão); só erro de negócio vai ao LLM (3.3 / módulo 8).
 - Resultado: testes 76 → 88; eval dos 20 casos de ticket (1 run) = **20/20**, 4,8 chamadas, 5,9 s — igual à versão local. O protocolo não piorou a qualidade.
+
+### stdio × HTTP: o transporte segue o deploy
+- **stdio** = ferramenta **local** do host (filesystem, git, IDE; o Claude Code com MCP local). Nasce e morre com o host; o SO isola (só o pai fala).
+- **HTTP** = **sistema compartilhado** de outro dono (o caso típico em empresa): vida própria, vários hosts, o dado persiste além de um host.
+- Na 3.2 cada Service Desk subia o **seu** servidor de tickets com os **seus** tickets — não corresponde a nada real. O aluno escolheu HTTP já na 3.3 (foco: MCP corporativo).
+- Com HTTP stateless some o problema da conexão longa: cada chamada é um POST independente → a fachada síncrona volta a ser `asyncio.run` por chamada (como o `a2a_client`). Em stdio não dava: o processo e os pipes **são** a conexão, presos ao loop que os criou.
+- Preço: mais um processo para operar, porta, e a identidade ingênua vira **falha real** (qualquer um que alcance a porta forja o `_meta`).
+
+### Streamable HTTP na 2026-07-28
+- Cada request = **um POST** autocontido em `/<sistema>/mcp`: corpo JSON-RPC (versão, capacidades e usuário em `params._meta`) + **headers que espelham o corpo**: `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` (nome da tool).
+- Por quê: um **gateway/load balancer/WAF** roteia, limita e autoriza **por tool sem abrir o JSON**. E o servidor recusa (400) header que contradiz o corpo — senão daria para enganar o gateway ("autorizado `list_my_tickets`", corpo `close_ticket`).
+- Sem sessão nem `Mcp-Session-Id`: qualquer instância responde qualquer request.
+- Resposta: JSON simples (`json_response`) ou stream SSE quando houver progresso no meio da chamada (3.4).
+
+### À mão vs SDK (MCP)
+- O SDK assumiu o **transporte**: framing, negociação de versão (probe `server/discover` + fallback para `initialize` de clientes/servidores `2025-11-25`, a maior parte do mercado hoje), validação do envelope (`_meta` obrigatório, versão suportada — o que escrevemos à mão na 3.2), HTTP, proteção contra DNS rebinding em localhost, timeout, paginação.
+- Continua **nosso**: quais tools existem, em nome de quem (`_meta`), a separação `isError` × erro de protocolo, a allowlist, a proveniência, as regras de negócio (os `tools.py` não mudaram).
+- **Low-level `Server` × `MCPServer`:** nossas tools já tinham contrato (`Tool` com schema escrito) → um adaptador genérico serve os 5 servidores. `MCPServer` (decorators, schema dos type hints) é o melhor para servidor novo — mas aí o contrato público fica **implícito** na assinatura (renomear parâmetro quebra clientes): proteger com teste de contrato.
+- **Peso:** o SDK traz pydantic, starlette, uvicorn, opentelemetry, auth… import do servidor ~2,6 s (vs 0,15 s à mão, achado 3.2a). Em HTTP pesa pouco (sobe uma vez e fica); em stdio pesaria em cada host que o inicia.
+- Fixar versão (`mcp==2.2.0`), como o `a2a-sdk`: a 2.0 quebrou a 1.x (`FastMCP` → `MCPServer`).
+- **Abstração plugável, testada duas vezes:** implementação (à mão → SDK) e transporte (stdio → HTTP) trocaram sem tocar o loop (`agent.py`). O `handoff.py` mudou só para **deixar de conhecer** `MCPClient`: recebe um registry de `Tool` — ficou mais desacoplado.
+
+### Um servidor por sistema
+- Fronteira de servidor = **fronteira de dono**: tickets (ITSM), knowledge (KB + status), account, assets (CMDB), catalog. Cada um com `tools.py` (regras) + `data.py` (o seu dado). O `src/data.py` ficou só com a infra compartilhada (relógio, login, diretório).
+- Em dev os 5 dividem **um processo e uma porta** (um path cada) — conveniência. Em produção cada time faz o deploy do seu; para o Service Desk só mudam as URLs (`MCP_SERVERS`). O próximo passo corporativo é um **gateway MCP** (agrega, autentica, namespace, allowlist central) — módulos 5/6.
+- O host descobre os 5 **uma vez** na subida e funde num registry só (`connect` → `merge`). Tool nova num servidor aparece no próximo restart.
+
+### Achados da 3.3
+- (e) corrigido: `merge` falha se dois servidores publicam o mesmo nome (tool shadowing). Namespace (`mcp__<servidor>__<tool>`) fica para quando houver servidor de terceiro / gateway.
+- (f) corrigido: `ToolUnavailable` — falha do **sistema** (fora do ar, timeout, erro de protocolo) **sobe** do `run_tool`; o chat responde com mensagem padrão do código, não com desculpa inventada pelo LLM. Erro de negócio continua indo ao LLM.
+- (d) corrigido: timeout de leitura (15 s) via SDK.
+- (g) ⚠️ **Banco compartilhado entre servidores:** a regra de troca de notebook do catálogo precisa dos dispositivos, que são do CMDB — e o catálogo **importa o dado do CMDB**. Só funciona porque em dev os dois dividem processo e seed; separados, o catálogo leria cópia velha. Correção real: perguntar ao CMDB pela API dele (servidor → servidor, com identidade própria) ou sincronizar por eventos. Ter o dado significa que os outros **perguntam**, não leem a sua tabela.
+- (c) agora é falha real: em HTTP qualquer um que alcance a porta age como qualquer usuário (`_meta` forjado). Mitigação: bind em `127.0.0.1`. Correção: token assinado (D10) → 3.5.
+- Custo por chamada: ~60 ms (conexão HTTP nova por tool call, `asyncio.run` + `Client` por chamada). Um loop longo numa thread reusaria a conexão — otimização, não necessidade.
+- (h) ⚠️ **Regressão que só o eval pegou (caso 42):** a correção do módulo 1 ("Solicito Adobe Acrobat Pro" não é justificativa) era um **callback Python no `Tool` do host** (`describe_request`: id `SW004` → nome do item). Função **não atravessa o protocolo** (`tools/list` leva nome, descrição, schema, `_meta`) → pelo MCP a regra sumiu em silêncio. O teste unitário passava porque roda o `Tool` local.
+  - Correção: **cada metade da regra onde está o dado dela.** "Só repete o pedido?" precisa do nome do item → **servidor** de catálogo (`provenance.restated`). "São palavras do usuário?" precisa da conversa → **host** (`from_user`). Teste novo **pelo MCP**, provado que falha sem a correção.
+  - Lacuna que resta (`xfail`, caso 42 em 1 de 3 runs): nome do item + palavras inventadas ("Solicita Adobe Acrobat Pro (instalação de software novo)") — o host não sabe que "Adobe Acrobat Pro" é o pedido, então essas palavras contam como do usuário (3/6 = 50%, passa). Correção real: o servidor pergunta direto ao usuário (**elicitation**, 3.4).
+  - Lição: testar a regra de negócio em processo **não** testa a regra pelo protocolo. O que depende de código do host não viaja.
+- Resultado: testes 88 → 94 (+2 `xfail`); eval 50 × 1 = **96%** (48/50: caso 15 de sempre + caso 42 antes da correção), 4,7 chamadas, 5,8 s, US$ 0,03 — mesmo patamar do function calling local (98% em 50 × 3, 6,6 s). Caso 42 depois da correção: 2/3.

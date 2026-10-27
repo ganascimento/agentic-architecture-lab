@@ -1,9 +1,12 @@
 """The user's own account. No tool here takes an email: there is no way to ASK for someone else's data.
 (Compare with the old get_user(email), which leaked any employee's data — eval case 16.)"""
 
-from src import data
+from src import data  # the company directory (shared)
+from src.services.mcp_servers.account import data as accounts  # this system's own data
 from src.auth import Session
 from src.tools._schema import NO_ARGS, Tool, definition
+
+INSTRUCTIONS = "The logged-in user's own account: profile and password reset."
 
 
 def get_my_profile(session: Session) -> dict:
@@ -12,7 +15,7 @@ def get_my_profile(session: Session) -> dict:
 
 def request_password_reset(session: Session) -> dict:
     # Sensitive action with NO arguments: the link always goes to the logged-in user's registered email.
-    data.PASSWORD_RESETS.append(session.email)
+    accounts.PASSWORD_RESETS.append(session.email)
     return {"sent_to": session.email, "expires_in_minutes": 30}
 
 
