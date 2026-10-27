@@ -42,6 +42,9 @@
   - [À mão vs SDK (MCP)](#à-mão-vs-sdk-mcp)
   - [Um servidor por sistema](#um-servidor-por-sistema)
   - [Achados da 3.3](#achados-da-33)
+  - [Function calling × MCP × A2A](#function-calling--mcp--a2a)
+  - [Resultado do módulo 3](#resultado-do-módulo-3)
+  - [Decisões do módulo 3](#decisões-do-módulo-3)
 
 ---
 
@@ -334,3 +337,23 @@
   - Lacuna que resta (`xfail`, caso 42 em 1 de 3 runs): nome do item + palavras inventadas ("Solicita Adobe Acrobat Pro (instalação de software novo)") — o host não sabe que "Adobe Acrobat Pro" é o pedido, então essas palavras contam como do usuário (3/6 = 50%, passa). Correção real: o servidor pergunta direto ao usuário (**elicitation**, 3.4).
   - Lição: testar a regra de negócio em processo **não** testa a regra pelo protocolo. O que depende de código do host não viaja.
 - Resultado: testes 88 → 94 (+2 `xfail`); eval 50 × 1 = **96%** (48/50: caso 15 de sempre + caso 42 antes da correção), 4,7 chamadas, 5,8 s, US$ 0,03 — mesmo patamar do function calling local (98% em 50 × 3, 6,6 s). Caso 42 depois da correção: 2/3.
+
+### Function calling × MCP × A2A
+- **Para o LLM é tudo function calling.** MCP e A2A mudam **onde** o código roda, **de quem** ele é e **quem decide** — não o que o modelo vê.
+- **Function calling local:** a tool é nossa e roda no nosso processo. Mais simples, mais rápido, sem rede nem identidade entre serviços. É o padrão.
+- **MCP:** **função ou dado de outro dono**, ou a mesma função usada por vários hosts (nosso agente, IDE, outro assistente). O nosso LLM decide e passa argumentos exatos. Custo: mais um processo para operar, rede (~60 ms por chamada), SDK pesado, identidade a resolver, e um contrato que **não carrega código** (achado h).
+- **A2A:** **delegar um objetivo** a um agente de outro contexto. O outro lado decide os passos, pode perguntar de volta (multi-turno) e devolve uma task. Custo: mais caro e opaco (o raciocínio e o trace do outro lado não aparecem para nós).
+- **Duas perguntas resolvem:** *quem decide o próximo passo?* (nosso LLM → tool/MCP; o outro lado → A2A) e *de quem é o código e o dado?* (nosso → function calling; outro dono → MCP).
+- **Na prática:** os mesmos 50 casos ficaram em 98% em function calling local (50 × 3, 6,6 s) e 96% via MCP (50 × 1, 5,8 s). Os protocolos não pioraram a qualidade; o que quebrou foi o que dependia de código do host (caso 42).
+
+### Resultado do módulo 3
+- Os 5 sistemas (tickets, knowledge, account, assets, catalog) viraram servidores MCP no SDK, sobre Streamable HTTP. O host descobre todos na subida e funde num registry só; o loop do agente não mudou.
+- Testes 76 → 95 (+2 `xfail`); eval 50 × 1 = **96%**, 4,7 chamadas, 5,8 s, US$ 0,03.
+- Ficaram de fora deste projeto: as aulas 3.4 (resources, elicitation, progress) e 3.5 (identidade no servidor MCP). O aluno estudou esses temas num projeto separado. As pendências que tocam este sistema foram para os módulos 4 (elicitation/confirmação humana, progress), 5 (gateway, custo de 18 tools), 6 (token no servidor MCP, catálogo lendo o CMDB) e 7 (resources).
+
+### Decisões do módulo 3
+- **D13:** fronteira de servidor MCP = **fronteira de dono do dado**. Quem não é dono pergunta pela API do dono, nunca lê a tabela dele.
+- **D14:** o **host** decide quem usa qual tool (allowlist fixa, nossa); o servidor publica schema e implementação. Nome repetido entre servidores = erro (namespace quando houver gateway ou servidor de terceiro).
+- **D15:** falha de **sistema** sobe para o código (mensagem padrão, log); só erro de **negócio** (`isError`) vai ao LLM.
+- **D16:** cada regra mora **onde está o dado dela**. Código do host não atravessa o protocolo → testar a regra **pelo protocolo**, não só em processo.
+- D10 vale igual para MCP: identidade no `_meta` só serve enquanto ninguém mais alcança a porta; o certo é token assinado.

@@ -113,7 +113,7 @@ evals/                     # cases.py (50 casos; acesso checado pelo artifact A2
   substitui uma peça, a versão antiga SAI do `main` (sem manter tudo vivo — decisão do aluno no módulo 2).
 - **Fim de módulo:** criar a branch `module-N` (para navegar no GitHub) + a tag `module-N-final` (imutável) no
   commit que fechou o módulo; o trabalho segue no `main`. Nomes de branch/tag em inglês.
-  Ex.: `module-1` / `module-1-final` → `40f6ef3`; `module-2` / `module-2-final` → commit de fechamento do módulo 2.
+  Ex.: `module-1` / `module-1-final` → `40f6ef3`; `module-2`, `module-3` (e `-final`) → commit de fechamento.
 - Revisitar lado a lado: `git worktree add ../ia-learn-module1 module-1-final`.
 - Nada de copiar o projeto por módulo (código duplicado diverge).
 
@@ -121,42 +121,17 @@ evals/                     # cases.py (50 casos; acesso checado pelo artifact A2
 
 Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md` e o histórico do git.
 
-- **Módulo atual:** 3 — MCP (Model Context Protocol). 3.1 teoria · 3.2 MCP à mão (fechada 2026-10-02) · 3.3 SDK + HTTP
-  (2026-10-02, **não commitada; aluno revisa**). Próximo: 3.4 resources/elicitation/progress.
-  - **3.3 (pedido do aluno: HTTP já, para TODOS os sistemas — foco é MCP corporativo):** 5 servidores MCP (tickets,
-    knowledge, account, assets, catalog) no SDK low-level, Streamable HTTP, 1 processo/porta em dev (`:8002/<sis>/mcp`),
-    cada pacote com tools.py + data.py; `src/tools` virou só maquinaria do host; cliente = fachada síncrona
-    (`asyncio.run` por chamada: HTTP stateless). Achados: (d) timeout ✅; (e) `merge` falha em nome repetido ✅;
-    (f) `ToolUnavailable` sobe do `run_tool` ✅; (g) catálogo LÊ o dado do CMDB (banco compartilhado) → registrar;
-    (h) regressão do caso 42: `describe_request` (callback no host) não atravessa o protocolo → metade da regra no
-    servidor (`provenance.restated`); caso misto fica `xfail` → elicitation (3.4); (c) virou falha real em HTTP (bind
-    127.0.0.1; token → 3.5). Import do servidor ~2,6 s (peso do SDK). Testes 94 (+2 xfail). Eval 50×1 = 96%, 4,7
-    chamadas, 5,8 s, US$ 0,03; caso 42 pós-correção 2/3.
-  - **3.2 (fechada):** tickets saíram de `src/tools` → `services/tickets_mcp` (servidor stdio, dono
-    do dado: TICKETS vive no PROCESSO do servidor; `/state` não mostra mais). Cliente à mão traduz tools/list → Tool;
-    o hub faz `REGISTRY | tickets.tools()` (allowlist do SPECS continua valendo: tool nova do servidor não chega a
-    ninguém). Erro de negócio = result `isError` (LLM lê); erro de protocolo = JSON-RPC error (código lê).
-  - Achados 3.2: (a) servidor levava **3,5 s** para subir: importava `openai.types` só por type hint em `_schema` →
-    `TYPE_CHECKING`, 0,15 s (servidor não deve depender do LLM do host); (b) **proveniência não cabe no servidor**
-    (ele não vê a conversa): declara em `_meta` (`com.company/fromUser`), o host aplica → outro host (IDE) ignora →
-    3.4 (elicitation); (c) identidade no `_meta` é INGÊNUA (servidor crê no email; ok só em stdio = processo filho)
-    → 3.5 (token assinado, D10); (d) cliente sem timeout de leitura → SDK.
-    Revisão com o aluno (2026-10-02): (e) **colisão de nome** — `REGISTRY | tickets.tools()`: o lado direito vence em
-    silêncio (tool shadowing; allowlist confere só o nome) → falhar na colisão na 3.3, discutir namespace;
-    (f) **falha de infra vira conversa** — `run_tool` entrega `MCPError`/`BrokenPipeError` ao LLM → relançar na 3.3.
-    Aluno entende bem: stdio/pipes, `_meta` × argumento (quem ESCREVE o campo), discover × list, proxy `partial`,
-    allowlist fixa × schema dinâmico, abstração plugável (trocar implementação não toca quem usa).
-  - Testes 76 → 88 (11,7 s). Eval casos de ticket (20, 1 run) = **20/20**, 4,8 chamadas, 5,9 s (igual ao local).
-  - **Preparação (2026-09-30, pedido do aluno):** domínio enriquecido, ainda em function calling (base para comparar
-    com MCP): KB com artigos internos (só TI) + `get_kb_article`; incidentes/manutenção (`list_active_incidents`);
-    tickets com SLA, escalonamento (só após o prazo), fechamento (resolução com proveniência), duplicado (por
-    produto); `assets` (dispositivos + diagnóstico remoto); `catalog` (pré-aprovado / gestor / bloqueado,
-    terceirizado, elegibilidade de troca de notebook) num **especialista novo (Catálogo)**; usuários pedro
-    (terceirizado) e bruno (TI); comentário de fornecedor com **injeção plantada** (INC0003). Eval 35 → 50 casos.
-  - Achados no caminho: duplicado por categoria/palavras falhou (categoria escolhida pelo LLM; PT × EN) → por
-    produto; proveniência com id opaco (`SW004`) aceitava "Solicito Adobe Acrobat Pro" → `describe_request`;
-    transferências paralelas ao MESMO agente perdiam um pedido (caso 11) → notas mescladas.
-  - Eval completo 50×3 = **98%** (só o caso 15 falha), 4,7 chamadas, 6,6 s, US$ 0,10. Antes das 3 correções: 94%.
+- **Módulo atual:** 4 — LangGraph avançado (ainda não começou).
+- [x] **Módulo 3 — MCP** (fechado pelo aluno em 2026-10-27; 3.4/3.5 estudados num projeto separado, não feitos aqui)
+  - Preparação (domínio enriquecido em function calling, eval 35 → 50: 98%) · 3.1 teoria · 3.2 MCP à mão (stdio,
+    stdlib: `3f10cec`) · 3.3 SDK + Streamable HTTP, os 5 sistemas como servidores MCP (`52c1fd2`).
+  - Achados corrigidos: import do LLM no servidor (`TYPE_CHECKING`), timeout, colisão de nome (`merge` falha),
+    falha de sistema sobe (`ToolUnavailable`), regra do caso 42 dividida (servidor `provenance.restated` + host
+    `from_user`). Abertos (ver pendências): identidade no `_meta` (c), banco compartilhado catálogo→CMDB (g),
+    caso 42 misto (`xfail`).
+  - Resultado: testes 95 (+2 xfail); eval 50×1 = **96%**, 4,7 chamadas, 5,8 s, US$ 0,03 (mesmo patamar do local).
+  - Aluno entende bem: stdio/pipes, `_meta` × argumento (quem ESCREVE o campo), discover × list, proxy `partial`,
+    allowlist fixa × schema dinâmico, abstração plugável, transporte segue o deploy, o que não atravessa o protocolo.
 - [x] **Módulo 2 — A2A** (fechado pelo aluno em 2026-09-29)
   - 2.1 teoria · 2.2 A2A à mão (stdlib) · 2.3 SDK oficial (streaming, GetTask, erros tipados) · 2.4 Acessos como
     serviço A2A + eval · 2.5 identidade entre serviços (JWT Ed25519: iss/sub/aud/exp, verificado antes do protocolo).
@@ -173,23 +148,24 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
 
 ## Pendências encaminhadas (retomar no módulo indicado)
 
-- **Módulo 3 (MCP):** próximos: 3.4 resources/elicitation/progress (elicitation fecha o `xfail` do caso 42 e o
-  `force_new`; progress pede SSE no lugar de `json_response`); 3.5 identidade + fronteiras + comparação final; comparar MCP × A2A × function calling na prática. Ganchos já no domínio: KB/incidentes como
-  **resources** (tool × resource), `force_new` (confirmação por flag do LLM) × **elicitation**, diagnóstico como
-  operação lenta → **progress**, catálogo lendo o dado do CMDB (achado g: API servidor→servidor), 18 tools → custo de
-  contexto/seleção de tools, identidade do usuário no servidor MCP (D4/D10 de novo).
 - **Módulo 4 (LangGraph):** **supervisor** (agent-as-tool + síntese), comparar "à mão × framework"; human-in-the-loop
-  para a aprovação da D2 (a task de acesso termina em `pending_approval`; aprovar é outro fluxo).
-- **Módulo 5 (Registry):** `AgentSpec` + grafo do handoff quase declarativos; **gateway MCP** (agrega os servidores,
-  namespace `mcp__<servidor>__<tool>`, allowlist central, roteia pelos headers `Mcp-Method`/`Mcp-Name`); unificar "o que cada agente trata";
+  para a aprovação da D2 (a task de acesso termina em `pending_approval`; aprovar é outro fluxo); confirmação humana
+  no lugar de flag do LLM: `force_new` e o caso 42 misto (`xfail`) — interrupt do LangGraph × elicitation do MCP;
+  diagnóstico remoto como operação lenta → progress (SSE no lugar de `json_response`).
+- **Módulo 5 (Registry):** 18 tools → custo de contexto/seleção de tools; `AgentSpec` + grafo do handoff quase
+  declarativos; **gateway MCP** (agrega os servidores, namespace `mcp__<servidor>__<tool>`, allowlist central,
+  roteia pelos headers `Mcp-Method`/`Mcp-Name`); unificar "o que cada agente trata";
   **contrato do dado estruturado** do artifact (`accessRequest` não está descrito no card → schema/extensão
   versionada); catálogo/descoberta quando houver muitos agentes remotos; Extended Agent Card.
-- **Módulo 6 (Segurança):** injeção indireta em comentário de terceiro (INC0003, caso 40 — hoje só a proveniência
+- **Módulo 6 (Segurança):** identidade no servidor MCP — hoje crê no email do `_meta` (achado 3.c; bind
+  127.0.0.1) → token assinado (D10), igual ao A2A; catálogo LÊ o dado do CMDB (achado 3.g) → API servidor→servidor
+  com identidade própria; injeção indireta em comentário de terceiro (INC0003, caso 40 — hoje só a proveniência
   do `close_ticket` segura; prompt de propósito sem defesa); artigo público aponta p/ interno (KB003 → KB017, PIN);
   triagem responde trivia (caso 15, 0/3); checagem de SENTIDO da justificativa
   (LLM-as-judge; proveniência só pega invenção, teste `xfail`); assinatura `[x agent]` ainda in-band; TTL das
   conversas no serviço de IAM (`agents` + `InMemoryTaskStore` nunca expiram — expirar juntos).
-- **Módulo 7 (RAG):** busca da KB por palavra (viés de artigo longo); duplicado de ticket por similaridade de
+- **Módulo 7 (RAG):** KB/incidentes como **resource** MCP (tool × resource: quem decide ler, o LLM ou o host);
+  busca da KB por palavra (viés de artigo longo); duplicado de ticket por similaridade de
   sentido (hoje lista de produtos); filtro de permissão (artigo interno) DENTRO do retrieval.
 - **Módulo 8 (Evals/Observabilidade):** tracing distribuído entre serviços (propagar `traceparent` no A2A: o agente
   remoto é opaco); negação por frase no checker; `cached_tokens`; eval em paralelo; LLM-as-judge.
@@ -213,6 +189,11 @@ Registradas também em `notes/SUMMARY.md`.
 - D11 A2A para AGENTE de outro contexto/time (fachada com skills de negócio); tool/MCP para função; separar por
   contexto delimitado, não por time
 - D12 estrutura das mensagens entre agentes (quem transferiu para quem) escrita pelo código; o LLM só o conteúdo
+- D13 fronteira de servidor MCP = fronteira de dono do dado; quem não é dono pergunta pela API, nunca lê a tabela
+- D14 o HOST decide quem usa qual tool (allowlist fixa, nossa); o servidor publica schema/implementação; nome
+  repetido entre servidores = erro (namespace quando houver gateway/terceiros)
+- D15 falha de sistema sobe para o código (mensagem padrão); só erro de negócio (`isError`) vai ao LLM
+- D16 cada regra mora onde está o dado dela; código do host não atravessa o protocolo → testar a regra PELO protocolo
 
 ## Dúvidas do aluno (histórico)
 

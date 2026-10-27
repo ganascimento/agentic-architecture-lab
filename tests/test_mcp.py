@@ -108,7 +108,7 @@ def test_a_justification_that_only_names_the_item_is_refused_over_mcp(systems):
 @pytest.mark.xfail(strict=True, reason="Known gap since module 3 (eval case 42, 1 of 3 runs): the HOST runs the "
                    "words check but no longer knows that SW004 is 'Adobe Acrobat Pro' (that was a host-side callback, "
                    "which doesn't cross the protocol), so the item's name counts as the user's words. Fix: the server "
-                   "asks the user directly (elicitation, lesson 3.4).")
+                   "asks the user directly (elicitation, module 4).")
 def test_item_name_plus_invented_words_is_refused_over_mcp(systems):
     result, is_error = run_tool("request_catalog_approval",
                                 {"item_id": "SW004", "justification": "Solicita Adobe Acrobat Pro (instalação de software novo)."},

@@ -216,7 +216,7 @@ def test_ticket_about_another_product_is_not_a_duplicate():
 
 
 def test_force_new_opens_it_anyway():
-    # The weak spot, on purpose: a flag the LLM itself sets. MCP elicitation (module 3) asks the USER instead.
+    # The weak spot, on purpose: a flag the LLM itself sets. MCP elicitation (module 4) asks the USER instead.
     _, is_error = run("open_ticket", {**NEW_OUTLOOK, "force_new": True}, ANA)
     assert is_error is False
 

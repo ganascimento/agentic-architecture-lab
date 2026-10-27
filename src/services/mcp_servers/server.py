@@ -91,7 +91,7 @@ def _on_behalf_of(meta: dict | None) -> Session:
     ⚠️ NAIVE, and over HTTP that's now a real hole: the server believes whatever email arrives, so ANYONE who can
     reach the port can act as anyone ({"com.company/user": "bruno@company.com"}). Over stdio (lesson 3.2) only
     the parent process could write to the server. Mitigation for now: listen on 127.0.0.1 only. The fix is the
-    same as D10 (a token signed by the caller, verified BEFORE the protocol) — lesson 3.5.
+    same as D10 (a token signed by the caller, verified BEFORE the protocol) — module 6.
     """
     email = (meta or {}).get(USER_KEY)
     if email not in data.USERS:
@@ -136,7 +136,7 @@ def mcp_server(name: str, system: ModuleType) -> Server:
 def make_app() -> Starlette:
     """All five servers in one ASGI app, one path each: /tickets/mcp, /knowledge/mcp, ..."""
     servers = [mcp_server(name, system) for name, system in SYSTEMS.items()]
-    # json_response: a plain JSON answer instead of an SSE stream — enough while no tool streams progress (3.4).
+    # json_response: a plain JSON answer instead of an SSE stream — enough while no tool streams progress (module 4).
     # stateless_http: no Mcp-Session-Id for the handshake-era clients either (the 2026-07-28 ones never have one).
     apps = {s.name: s.streamable_http_app(stateless_http=True, json_response=True) for s in servers}
 

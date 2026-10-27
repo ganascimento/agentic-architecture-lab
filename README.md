@@ -45,7 +45,7 @@ kept in its own branch (`module-N`) and tag (`module-N-final`).
 |---|---|---|
 | 1 | Multi-Agent Architecture: single agent, routing, handoff (mesh and hub) | ✅ done — branch `module-1` |
 | 2 | A2A (Agent2Agent protocol): remote agent, official SDK, streaming, signed service identity | ✅ done — branch `module-2` |
-| 3 | MCP (Model Context Protocol) | 🚧 in progress: every system as an MCP server over HTTP (SDK) |
+| 3 | MCP (Model Context Protocol): hand-written stdio server, then every system as an MCP server over Streamable HTTP (SDK) | ✅ done — branch `module-3` |
 | 4 | Advanced LangGraph: checkpoints, human-in-the-loop | ⏳ |
 | 5 | Agent Builder + Registry | ⏳ |
 | 6 | Security & Governance | ⏳ |
@@ -168,7 +168,7 @@ With the MCP servers running, it prints the negotiated version, one tool transla
 
 Under the hood each request is one `POST /<system>/mcp`: a JSON-RPC body (version, client capabilities and the user in `params._meta`) plus headers that mirror it (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`), so a gateway can route by tool without parsing JSON. A call with no user in `_meta` gets a JSON-RPC error (a problem in the calling code).
 
-> ⚠️ Known gap (until lesson 3.5): the servers trust the user email in `_meta`, so anything that reaches the port can act as anyone. They listen on `127.0.0.1` only. The fix is the same signed token used for A2A.
+> ⚠️ Known gap (planned for module 6): the servers trust the user email in `_meta`, so anything that reaches the port can act as anyone. They listen on `127.0.0.1` only. The fix is the same signed token used for A2A.
 
 ## 🧪 Testing
 
