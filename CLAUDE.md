@@ -50,19 +50,22 @@ cresce um módulo por vez; cada módulo adiciona um conceito ao mesmo sistema.
   **`gpt-6-luna`** com `reasoning_effort="none"` (no Chat Completions a Luna só faz tool calling com `none`).
   (gpt-4o-mini, classificador do módulo 1, é MAIS caro por token que a Luna.)
 - Envs: `OPENAI_API_KEY` (no `.env`, nunca commitar), `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `ACCESS_AGENT_URL`,
-  `MCP_BASE_URL`.
+  `MCP_BASE_URL`, `DESK_TOPOLOGY` (`hub` | `supervisor`).
 - Rodar (venv ativo), três terminais: `python -m src.services.access_a2a` (Acessos, time de IAM, :8001),
   `python -m src.services.mcp_servers` (os 5 sistemas como servidores MCP HTTP, :8002/<sistema>/mcp) e `python -m src`
-  (Service Desk; login ana/ana123 etc. em `src/data.py`). `python -m pytest -q` (sem LLM) ·
-  `python -m evals.run [--case ...] [--runs N]` (sobe A2A + MCP em threads; reseta o dado de cada sistema por run) ·
+  (Service Desk; login ana/ana123 etc. em `src/data.py`; conversas salvas em `.state/`, comandos `/threads` `/open`
+  `/history` `/undo` e, para gestores, `/approvals` `/approve` `/reject`). `python -m pytest -q` (sem LLM) ·
+  `python -m evals.run [--case ...] [--runs N] [--topology supervisor]` (sobe A2A + MCP em threads; reseta o dado
+  de cada sistema por run; responde confirmações com `Case.confirm`) ·
   demo do cliente MCP (servidores no ar): `python -m src.services.mcp_client`.
 - **Economia de tokens:** desenvolver com `--case` e `--runs 1`; eval completo (50 × 3, ~US$ 0,10) só nos marcos.
 - Módulo 1 sem framework (de propósito). Módulo 2: `a2a-sdk[http-server]==1.1.5`, `uvicorn`, `pyjwt[crypto]` —
   versões FIXADAS (os dois lados do protocolo precisam concordar). Chave Ed25519 do Service Desk em `.keys/`
   (gerada no 1º uso, git-ignored). Módulo 3: spec **`2026-07-28`** (stateless: sem
   `initialize`/sessão, `_meta` por request; tasks viraram extensão; elicitation via MRTR). 3.2 à mão (stdio, stdlib:
-  commit `3f10cec`); 3.3 SDK `mcp==2.2.0` FIXADO, Streamable HTTP (serve também clientes 2025-11-25). LangGraph: módulo 4.
-  Demais dependências: no módulo em que aparecem.
+  commit `3f10cec`); 3.3 SDK `mcp==2.2.0` FIXADO, Streamable HTTP (serve também clientes 2025-11-25). Módulo 4:
+  `langgraph==1.2.18` + `langgraph-checkpoint-sqlite==3.1.2` FIXADOS, **sem** LangChain (modelos/tools/mensagens
+  continuam nossos; o `langchain-core` vem só como dependência). Demais dependências: no módulo em que aparecem.
 - Docker disponível para serviços auxiliares (vector DB, observabilidade etc.).
 - Push pelo WSL falha (askpass antigo do VS Code): usar `"/mnt/c/Program Files/Git/cmd/git.exe" push`.
 
@@ -82,7 +85,8 @@ CLAUDE.md                  # este arquivo — contexto persistente (enxuto: deta
 notes/SUMMARY.md           # ARQUIVO ÚNICO de revisão (PT-BR): uma seção por módulo, bullets curtos + decisões
 .claude/skills/linkedin-post/  # skill /linkedin-post: texto + prompt de imagem NA CONVERSA (não cria arquivo)
 src/
-  __main__.py              # chat no terminal: login + Service Desk
+  __main__.py              # chat no terminal: login + Service Desk (conversas salvas, /approve p/ gestores)
+  conversations.py         # checkpointer SQLite (.state/, git-ignored) + thread_id construído da Session (nunca digitado)
   config.py  auth.py       # modelos/preços · login local → Session (identidade vem daqui, nunca do chat)
   identity.py              # token delegado ASSINADO p/ outros serviços (iss=service-desk, sub=usuário, aud, exp 60s)
   data.py                  # infra compartilhada: relógio FIXO (`NOW`), contas de login, diretório (USERS). O resto
@@ -91,8 +95,10 @@ src/
   tools/                   # maquinaria do HOST (nenhum sistema local): _schema (Tool, ToolUnavailable; sem import
                            # da OpenAI em runtime) · provenance · run_tool (allowlist, proveniência; falha de sistema
                            # SOBE, não vira texto p/ o LLM) · merge (nome repetido entre servidores = erro)
-  architectures/           # service_desk() = HUB: handoff (grafo, triagem-agente) · specialists (Suporte, Conta,
-                           # Catálogo) · remote (RemoteAgent: nó do grafo = agente de outro time via A2A, sem LLM)
+  architectures/           # service_desk(topology) em LangGraph: graph_desk (base: thread, turno/resume, confirmação,
+                           # history/undo, custos) · handoff (HUB: StateGraph, Command(goto)) · supervisor (agent-as-tool,
+                           # Send em paralelo, reducers) · confirm (faixas de proveniência, "sim" estrito) · specialists
+                           # · remote (RemoteAgent SEM estado: task/context A2A são ponteiros no estado do grafo)
   services/                # sistemas/agentes de OUTROS donos, fora do nosso processo
     a2a_client.py          # cliente A2A no SDK (descoberta + envio com streaming + GetTask), fachada síncrona
     mcp_client.py          # cliente MCP no SDK (HTTP), fachada síncrona (asyncio.run por chamada: HTTP stateless);
@@ -100,9 +106,12 @@ src/
     mcp_servers/           # os sistemas da empresa como servidores MCP: server.py (SDK low-level: adaptador genérico
                            # Tool → servidor, identidade do `_meta`, 5 apps montados em 1 porta) + 1 pacote por
                            # sistema (tickets knowledge account assets catalog), cada um com tools.py + data.py
-    access_a2a/            # time de IAM: server (SDK: AccessExecutor, card c/ security scheme) · auth (verifica o
-                           # token: 401 antes do protocolo) · agent (ACCESS_ROLE + ask_user) · tools · data
-tests/                     # sem LLM: tools, auth, a2a, mcp (HTTP real + fio cru + cliente 2025-11-25), architectures
+    access_a2a/            # time de IAM: server (SDK: AccessExecutor, card c/ security scheme; rotas /approvals) · auth
+                           # (verifica o token: 401 antes do protocolo) · agent (ACCESS_ROLE + ask_user) · tools · data
+                           # · approval (aprovação do gestor = grafo com interrupt; quem retoma é checado no código)
+    iam_approvals.py       # lado do gestor: lista/decide aprovações por HTTP com token assinado (sem LLM, D2)
+tests/                     # sem LLM: tools, auth, a2a, mcp (HTTP real + fio cru + cliente 2025-11-25), architectures,
+                           # conversations (restart = objeto novo no mesmo SQLite), confirmation, approvals, supervisor
 evals/                     # cases.py (50 casos; acesso checado pelo artifact A2A), run.py (regressão; sobe A2A +
                            # MCP; custo/chamadas = nosso + remoto), results/ (fora do git: gerado a cada run)
 ```
@@ -113,7 +122,7 @@ evals/                     # cases.py (50 casos; acesso checado pelo artifact A2
   substitui uma peça, a versão antiga SAI do `main` (sem manter tudo vivo — decisão do aluno no módulo 2).
 - **Fim de módulo:** criar a branch `module-N` (para navegar no GitHub) + a tag `module-N-final` (imutável) no
   commit que fechou o módulo; o trabalho segue no `main`. Nomes de branch/tag em inglês.
-  Ex.: `module-1` / `module-1-final` → `40f6ef3`; `module-2`, `module-3` (e `-final`) → commit de fechamento.
+  Ex.: `module-1` / `module-1-final` → `40f6ef3`; `module-2`, `module-3`, `module-4` (e `-final`) → commit de fechamento.
 - Revisitar lado a lado: `git worktree add ../ia-learn-module1 module-1-final`.
 - Nada de copiar o projeto por módulo (código duplicado diverge).
 
@@ -121,7 +130,18 @@ evals/                     # cases.py (50 casos; acesso checado pelo artifact A2
 
 Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md` e o histórico do git.
 
-- **Módulo atual:** 4 — LangGraph avançado (ainda não começou).
+- **Módulo atual:** 5 — Agent Builder + Registry (não iniciado).
+- [x] **Módulo 4 — LangGraph avançado** (fechado pelo aluno em 2026-10-28; aulas feitas de uma vez a pedido dele)
+  - 4.1 teoria · 4.2 hub em LangGraph (StateGraph, `Command(goto)`, Agent inteiro no nó) · 4.3 checkpointing
+    (SQLite, thread_id da Session, `/history` `/undo`) · 4.4 human-in-the-loop (confirmação do usuário por
+    `interrupt` entre nós + aprovação do gestor no IAM, fecha a D2) · 4.5 supervisor (`Send` + reducers + síntese).
+  - Achados: `run_tool` engoliria `GraphInterrupt`; ponteiro durável → task do IAM em memória; `update_state`
+    apaga o interrupt. Caso 42 fechado na camada do desk (faixas de proveniência).
+  - Resultado: testes 95 → 137 (+1 xfail). Evals NÃO rodaram (chave expirou) → pendências.
+  - Demo visual à parte: `C:\Projetos\langgraph-demo` (mini-runtime JS com as regras do LangGraph; repo próprio).
+  - Aluno entende bem: execução durável (por que o framework), servidor stateless + armazenamento stateful,
+    thread_id = ponteiro (não permissão), resume re-executa o nó, hub ≠ tudo passa pela triagem (active + confirm
+    volta a quem segurou), router × join × supervisor (supervisor recebe de volta e reage).
 - [x] **Módulo 3 — MCP** (fechado pelo aluno em 2026-10-27; 3.4/3.5 estudados num projeto separado, não feitos aqui)
   - Preparação (domínio enriquecido em function calling, eval 35 → 50: 98%) · 3.1 teoria · 3.2 MCP à mão (stdio,
     stdlib: `3f10cec`) · 3.3 SDK + Streamable HTTP, os 5 sistemas como servidores MCP (`52c1fd2`).
@@ -148,10 +168,10 @@ Atualizar ao final de cada aula/entrega. Detalhe de cada aula: `notes/SUMMARY.md
 
 ## Pendências encaminhadas (retomar no módulo indicado)
 
-- **Módulo 4 (LangGraph):** **supervisor** (agent-as-tool + síntese), comparar "à mão × framework"; human-in-the-loop
-  para a aprovação da D2 (a task de acesso termina em `pending_approval`; aprovar é outro fluxo); confirmação humana
-  no lugar de flag do LLM: `force_new` e o caso 42 misto (`xfail`) — interrupt do LangGraph × elicitation do MCP;
-  diagnóstico remoto como operação lenta → progress (SSE no lugar de `json_response`).
+- **Do módulo 4 (quando houver chave da OpenAI):** rodar os evals — 50×1 hub, 50×1 `--topology supervisor`,
+  `--case 42 43 47 49` (a chave expirou no meio do módulo); com os números, decidir hub × supervisor no `main`
+  (recomendação: só o hub, D7; o supervisor fica na tag `module-4-final`). Não feito: diagnóstico remoto como
+  operação lenta → progress (SSE no lugar de `json_response`) e streaming no chat.
 - **Módulo 5 (Registry):** 18 tools → custo de contexto/seleção de tools; `AgentSpec` + grafo do handoff quase
   declarativos; **gateway MCP** (agrega os servidores, namespace `mcp__<servidor>__<tool>`, allowlist central,
   roteia pelos headers `Mcp-Method`/`Mcp-Name`); unificar "o que cada agente trata";
@@ -194,6 +214,10 @@ Registradas também em `notes/SUMMARY.md`.
   repetido entre servidores = erro (namespace quando houver gateway/terceiros)
 - D15 falha de sistema sobe para o código (mensagem padrão); só erro de negócio (`isError`) vai ao LLM
 - D16 cada regra mora onde está o dado dela; código do host não atravessa o protocolo → testar a regra PELO protocolo
+- D17 pausa humana ENTRE nós, nunca dentro do loop/tool; efeito colateral depois do interrupt
+- D18 decisão humana de alto impacto viaja como comando autenticado, nunca pelo chat/LLM; quem retoma uma thread é
+  autorizado no código (thread_id ≠ permissão)
+- D19 verificação com zona cinzenta: decide o certo, recusa o errado, PERGUNTA ao humano no meio
 
 ## Dúvidas do aluno (histórico)
 

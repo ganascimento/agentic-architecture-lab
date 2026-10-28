@@ -45,6 +45,15 @@
   - [Function calling × MCP × A2A](#function-calling--mcp--a2a)
   - [Resultado do módulo 3](#resultado-do-módulo-3)
   - [Decisões do módulo 3](#decisões-do-módulo-3)
+- [Módulo 4: LangGraph avançado](#módulo-4-langgraph-avançado)
+  - [Por que um framework de grafo](#por-que-um-framework-de-grafo)
+  - [Modelo mental](#modelo-mental)
+  - [O hub em LangGraph (4.2)](#o-hub-em-langgraph-42)
+  - [Checkpointing (4.3)](#checkpointing-43)
+  - [Human-in-the-loop (4.4)](#human-in-the-loop-44)
+  - [Supervisor (4.5)](#supervisor-45)
+  - [Resultado do módulo 4](#resultado-do-módulo-4)
+  - [Decisões do módulo 4](#decisões-do-módulo-4)
 
 ---
 
@@ -357,3 +366,67 @@
 - **D15:** falha de **sistema** sobe para o código (mensagem padrão, log); só erro de **negócio** (`isError`) vai ao LLM.
 - **D16:** cada regra mora **onde está o dado dela**. Código do host não atravessa o protocolo → testar a regra **pelo protocolo**, não só em processo.
 - D10 vale igual para MCP: identidade no `_meta` só serve enquanto ninguém mais alcança a porta; o certo é token assinado.
+
+## Módulo 4: LangGraph avançado
+
+### Por que um framework de grafo
+- O hub do módulo 1 já era uma máquina de estados escrita à mão: estado em atributos, nós = agentes, arestas = `HUB` + `_intercept`, laço com `MAX_HANDOFFS`.
+- O que esse desenho não fazia: sobreviver a restart, pausar esperando um humano, retomar depois de uma falha, rebobinar passo a passo. Os quatro são o mesmo problema: **execução durável**. É isso que o LangGraph vende, não "fazer agentes" (agente já fazemos em `core/agent.py`).
+- **Regra de bolso:** framework de grafo se paga quando você precisa de durabilidade. Sem isso, o loop à mão é menor e mais fácil de depurar.
+- **Quando não usar:** fluxo curto sem pausa; workflow determinístico longo (Temporal, Restate, DBOS são mais maduros em retry e timer); uma única aprovação (tabela com `status` + endpoint resolve).
+- **Custos:** mais uma camada entre você e o que acontece (o stack trace passa pelo runtime); estado obrigatoriamente serializável; mudar o schema do estado quebra threads salvas; a API ainda se mexe (versão fixada). Puxa o `langchain-core` mesmo sem usarmos LangChain (~1/3 do tempo de import).
+
+### Modelo mental
+- **Estado** (`TypedDict` só com dados) + **nós** (recebem o estado, devolvem só o que mudou) + **arestas**: fixa (`add_edge`), condicional, `Command(goto, update)` (o nó escolhe o próximo) e `Send` (dispara o mesmo nó N vezes em paralelo).
+- **Reducer** = como juntar escritas no mesmo canal. Sem reducer, o último sobrescreve. Dois nós escrevendo no mesmo passo sem reducer = `InvalidUpdateError`: o LangGraph não escolhe um vencedor em silêncio. Os casos 10 e 11 do módulo 1 eram esse bug escrito à mão.
+- **Super-steps (Pregel):** os nós agendados rodam juntos, ninguém vê o update do outro dentro do passo, os reducers juntam tudo e o checkpoint é salvo.
+- **Checkpointer ≠ memória de longo prazo:** o checkpointer guarda uma thread; "o que sei da Ana entre conversas" é o `Store`.
+- **Subgraph** = composição dentro do processo; outro serviço ou time = A2A. Não usamos: nenhum especialista tem fluxo com estado próprio, e o único que tem (a aprovação) mora no IAM.
+
+### O hub em LangGraph (4.2)
+- "Opção A": o `Agent` inteiro dentro de um nó; só a orquestração trocou (uma variável por vez no eval). Transferência = `Command(goto=...)`.
+- **Dados × objetos vivos:** `Agent`, `RemoteAgent` e `Session` ficam fora do estado e são reconstruídos. O `RemoteAgent` ficou sem estado: o task/context A2A virou ponteiro no estado do grafo.
+- A `Session` mora no objeto do desk (um por login). Com um grafo servindo vários usuários (servidor web), a identidade vai por requisição, no `context`.
+- `MAX_HANDOFFS` continua: o `recursion_limit` conta super-steps e derruba o turno com erro; o nosso conta transferências e termina limpo.
+- O framework assumiu: o laço, os reducers, salvar, retomar, o histórico. Continua nosso: quem transfere para quem, a política de handoff, a nota, todas as regras de negócio.
+- **Hub não é "tudo passa pela triagem":** cada turno começa no agente `active` (`START → active`), e a confirmação volta para quem segurou a chamada. A triagem decide **quem** atende; a conversa fica com quem atende (D3).
+- ⚠️ **Achado:** `GraphInterrupt` é subclasse de `Exception`, e o `run_tool` faz `except Exception` → transformaria a pausa em texto para o LLM. Regra estrutural: `interrupt` nunca dentro do loop do agente nem de uma tool.
+
+### Checkpointing (4.3)
+- SQLite em `.state/` (git-ignored, guarda conversas de usuários); Postgres em produção (mesma interface).
+- **Servidor stateless, armazenamento stateful:** agentes são código e config; a memória da conversa é dado no banco, lido e gravado em **todo** turno. Recuperar depois de uma queda não é modo especial: é o funcionamento normal.
+- **`thread_id = "<email>/<n>"` montado pelo código** a partir da `Session`; o usuário nunca digita. O `thread_id` é **ponteiro, não permissão**: o LangGraph abre qualquer thread que você nomear (IDOR, achado 1.2). Em produção: tabela `conversations(id, owner)` e conferir o dono antes de carregar.
+- `durability="sync"`: cada passo vai para o disco antes do próximo. Queda no meio do turno → a próxima mensagem começa um turno novo do `START` (certo para chat; num workflow de backend, `invoke(None, config)` retoma os nós pendentes).
+- `/history` e `/undo` (fork a partir do checkpoint anterior). **Time travel desfaz a memória, não o mundo:** o chamado aberto continua aberto, e o agente pode abrir outro igual. Desfazer efeito é compensação, regra de negócio.
+- ⚠️ **Achado:** ponteiro durável → estado não durável. A task A2A foi para o disco, mas o IAM guarda tasks em memória: restart do IAM → `TaskNotFoundError` derrubava o chat → agora abre task nova. Pergunta para qualquer estado durável: **o que o ponteiro aponta também é durável?**
+- Para escalar: um grafo compilado para todos, Postgres, e **um escritor por thread** (lock ou fila; duas abas na mesma conversa gravam uma por cima da outra).
+
+### Human-in-the-loop (4.4)
+- **No resume, o nó roda de novo desde a primeira linha:** chamada de LLM ou efeito colateral antes do `interrupt` se repete (pago duas vezes, podendo decidir diferente).
+- **Por isso a pausa fica ENTRE nós ("A+"):** o desk segura a chamada, o nó do agente termina, o nó `confirm` faz o `interrupt` sem nada antes dele, executa a tool **uma vez** depois do "sim" e volta ao agente que pediu.
+- **Faixas de proveniência:** <50% das palavras do usuário recusa, 50–99% mostra o texto exato e pergunta, 100% roda. `force_new` sempre pergunta (a flag não prova nada). Fechou o caso 42.
+- O texto da pergunta é escrito pelo **código** com os argumentos reais; "sim" é estrito ("sim, mas…" não é sim); os valores confirmados viram palavras do usuário e todas as outras checagens rodam.
+- **Interrupt × elicitation:** o interrupt protege o **nosso** host; a elicitation protege o **servidor** contra qualquer host.
+- ⚠️ **Achado:** `update_state` numa thread pausada **apaga o interrupt**, sem erro. Ferramenta de operação confere `get_state(...).interrupts` antes de editar.
+- O eval simula a resposta do usuário (`Case.confirm`) e mede quantas confirmações pediu: cada uma é atrito.
+- **(B) Aprovação do gestor (fecha a D2):** grafo no IAM (`wait_for_manager` com `interrupt` → `apply_decision`). A decisão chega por `/approve` → HTTP com token, **sem LLM no caminho**. Só o aprovador decide, nunca o solicitante (autenticação ≠ autorização). Lock no "confere e retoma" (dois cliques). Checkpoint do IAM em memória junto com o dado dele, para não divergirem numa queda.
+- **Nota honesta:** para uma aprovação, coluna `status` + endpoint bastam. O grafo se paga com segundo aprovador, lembrete/escalonamento, provisionamento que falha e precisa ser retomado.
+
+### Supervisor (4.5)
+- O supervisor só tem as tools `ask_*`. O código intercepta cada chamada como um job → `Command(goto=[Send("worker", job), ...])` → workers em paralelo no mesmo super-step → reducer junta → o supervisor roda de novo e **sintetiza** uma resposta.
+- O payload do `Send` leva a conversa, não um resumo (D6).
+- Reducers: `_results` acumula e zera com `None` a cada turno (sem isso, respostas vazariam para o turno seguinte); `_first` = uma confirmação por vez.
+- **Um job por especialista** por rodada (corretude: dois workers no mesmo `Agent` disputariam o `agent.messages`); `MAX_ROUNDS = 2` (anti-ping-pong desta topologia, D8).
+- **Router × join × supervisor:** o router despacha e sai (respostas separadas); um nó de código junta sem LLM (barato, uma voz); o supervisor **recebe de volta e reage** — combina, percebe o que falta, delega de novo. Custo: uma chamada de síntese por rodada e o "telefone sem fio" (reescrever pode distorcer um detalhe).
+- A base comum (thread, turno/resume, confirmação, `/history`, `/undo`, custos) foi para `graph_desk.py`: o segundo uso justificou a abstração.
+
+### Resultado do módulo 4
+- O hub foi reescrito em LangGraph, as conversas vivem em SQLite, a confirmação do usuário e a aprovação do gestor são `interrupt`, e o supervisor virou a segunda topologia (`DESK_TOPOLOGY`).
+- Testes 95 → 137 (+1 `xfail`).
+- ⚠️ **Evals não rodaram:** a `OPENAI_API_KEY` expirou no meio do módulo. Pendentes: 50 × 1 hub, 50 × 1 supervisor e `--case 42 43 47 49`. A escolha hub × supervisor no `main` espera esse número; a recomendação é manter só o hub (D7) e registrar o supervisor aqui.
+- Demo visual à parte (`langgraph-demo`): um mini-runtime em JS com as regras do LangGraph, mostrando `Command`, `interrupt` com queda do servidor, `Send` e `InvalidUpdateError`.
+
+### Decisões do módulo 4
+- **D17:** a pausa humana fica **entre nós**, nunca dentro do loop ou de uma tool; o efeito colateral vem **depois** do `interrupt`.
+- **D18:** decisão humana de alto impacto viaja como **comando autenticado**, nunca pelo chat ou pelo LLM. Quem retoma uma thread é autorizado no código: `thread_id` não é permissão.
+- **D19:** verificação com zona cinzenta: decide o certo, recusa o errado e **pergunta ao humano** no meio.
