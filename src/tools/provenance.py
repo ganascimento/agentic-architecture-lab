@@ -59,6 +59,19 @@ def restated(arg: str, value: str, request_text: str) -> str | None:
     return None if _leftover(value, request_text) else _message(arg, _RESTATES)
 
 
+def request_text(arguments: dict, arg: str) -> str:
+    """The OTHER arguments of the call: they ARE the request (e.g. the resource), so their words prove nothing."""
+    return " ".join(str(v) for k, v in arguments.items() if k != arg)
+
+
+def verbatim(value: str, user_texts: list[str], request_text: str = "") -> bool:
+    """EVERY leftover word is the user's — the LLM added nothing. check() lets 50% through (the LLM rephrases),
+    so between 50% and 100% the words are only PROBABLY the user's: module 4 asks the user to confirm them
+    instead of guessing (eval case 42: the item's name + invented words passed at exactly 50%)."""
+    user_words = set().union(*(content_words(t) for t in user_texts))
+    return all(_in_user_words(w, user_words) for w in _leftover(value, request_text))
+
+
 def check(arg: str, value: str, user_texts: list[str], request_text: str = "") -> str | None:
     """None if `value` passes; otherwise the error message for the LLM (it should ask the user)."""
     problem = _problem(value, user_texts, request_text)

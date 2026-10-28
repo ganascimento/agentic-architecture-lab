@@ -16,7 +16,10 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 ## ✨ Features
 
 - 🧠 **Framework-free agent loop**: the model calls tools in a plain Python loop you can read end to end.
-- 🔀 **Handoff hub-and-spoke**: a reception agent routes the conversation to specialists (Support, Account, Catalog), who talk to the user directly.
+- 🔀 **Handoff hub-and-spoke on LangGraph**: a reception agent routes the conversation to specialists (Support, Account, Catalog), who talk to the user directly. Each agent is a graph node; the state is saved after every step.
+- 🧭 **Supervisor topology** (to compare): one agent talks to the user and calls the specialists as tools, in parallel, then combines their answers.
+- 💾 **Durable conversations**: saved in SQLite, they survive a restart; `/history` shows every saved step and `/undo` forgets the last turn.
+- ✋ **Human in the loop**: the user confirms a request before it runs when the justification is only probably theirs; managers approve access requests through a paused workflow, never through the chat.
 - 🌐 **Agent2Agent (A2A)**: the Access agent is another team's independent service, discovered through its Agent Card and called over JSON-RPC with streaming progress (official `a2a-sdk`).
 - 🔌 **Model Context Protocol (MCP)**: every company system (tickets, knowledge base, account, assets, catalog) is its own MCP server over HTTP that owns its data. The Service Desk discovers their tools at runtime and the agents call them like local ones (official `mcp` SDK, spec `2026-07-28`, stateless; older `2025-11-25` clients still work).
 - 🔐 **Login + least privilege**: identity comes from the session (never from the chat), tools only touch the user's own data, and nothing in the Service Desk can grant access. Between services, a short-lived signed token (JWT) says who calls and on whose behalf.
@@ -32,6 +35,7 @@ Hands-on lab for agentic system architecture: multi-agent design, A2A, MCP, Lang
 | LLM | OpenAI (`openai` SDK, Chat Completions): `gpt-6-luna` |
 | Agent-to-agent | A2A v1.0 on the official SDK (`a2a-sdk` 1.1.5, pinned), JSON-RPC + streaming (SSE), served by uvicorn |
 | Tools | MCP `2026-07-28` on the official SDK (`mcp` 2.2.0, pinned), Streamable HTTP |
+| Orchestration | LangGraph 1.2 (pinned): StateGraph, checkpoints (SQLite), interrupts, `Send` — without LangChain models or tools |
 | Service identity | Signed JWT (`pyjwt`, Ed25519): who calls and on whose behalf |
 | Config | `python-dotenv` |
 | Tests | `pytest` |
@@ -46,7 +50,7 @@ kept in its own branch (`module-N`) and tag (`module-N-final`).
 | 1 | Multi-Agent Architecture: single agent, routing, handoff (mesh and hub) | ✅ done — branch `module-1` |
 | 2 | A2A (Agent2Agent protocol): remote agent, official SDK, streaming, signed service identity | ✅ done — branch `module-2` |
 | 3 | MCP (Model Context Protocol): hand-written stdio server, then every system as an MCP server over Streamable HTTP (SDK) | ✅ done — branch `module-3` |
-| 4 | Advanced LangGraph: checkpoints, human-in-the-loop | ⏳ |
+| 4 | Advanced LangGraph: hub as a graph, checkpoints (SQLite), human-in-the-loop, supervisor with parallel specialists | 🚧 in progress |
 | 5 | Agent Builder + Registry | ⏳ |
 | 6 | Security & Governance | ⏳ |
 | 7 | Advanced RAG | ⏳ |
@@ -81,6 +85,7 @@ cp .env.example .env   # then put your OpenAI API key in .env
 | `AGENT_MODEL` | Model for every agent (default `gpt-6-luna`) | ⚪ optional |
 | `AGENT_REASONING_EFFORT` | Reasoning effort (default `none`; the Chat Completions API only does tool calling with `none` for this model) | ⚪ optional |
 | `ACCESS_AGENT_URL` | Base URL of the Access agent (default `http://localhost:8001`); the rest comes from its Agent Card | ⚪ optional |
+| `DESK_TOPOLOGY` | `hub` (default) or `supervisor` | ⚪ optional |
 
 ### Commands
 
@@ -95,6 +100,7 @@ Every new terminal needs the virtual environment active first: `source .venv/bin
 | `python -m src.services.mcp_client` | MCP demo: talks to the tickets server and shows discovery, what the LLM sees and tools/call |
 | `python -m pytest -q` | Runs the tests (no LLM calls, no cost) |
 | `python -m evals.run` | Runs the eval (starts the Access agent and the MCP servers by itself; calls the LLM) |
+| `python -m evals.run --topology supervisor` | The same eval on the supervisor topology |
 
 ### Running the Service Desk
 
@@ -122,7 +128,16 @@ Log in with a test account (plaintext passwords, study only):
 | `pedro` | `pedro123` | Pedro Costa (Sales, **contractor**: pre-approved catalog items only) |
 | `bruno` | `bruno123` | Bruno Tavares (IT: sees internal KB articles) |
 
-Chat commands: `/new` starts a new conversation, `/quit` exits.
+Chat commands:
+
+| Command | What it does |
+|---|---|
+| `/new`, `/threads`, `/open <n>` | Start, list and reopen your saved conversations (`.state/service_desk.sqlite`) |
+| `/history` | Every saved step (checkpoint) of this conversation |
+| `/undo` | Forget the last turn (a fork: the history keeps it; tickets it opened stay open) |
+| `/approvals`, `/approve <id>`, `/reject <id>` | Managers decide access requests (e.g. log in as `marta`) — commands, never the chat |
+| `/quit` | Exit (log in again later: the conversation continues) |
+
 All the data lives in other processes (the IAM service and the MCP servers): ask the agent about it ("my tickets", "my access requests").
 
 Try these messages:
@@ -199,10 +214,14 @@ src/
 ├── data.py                # Shared infra: company clock, login accounts, user directory
 ├── core/agent.py          # The generic agent loop
 ├── tools/                 # Host tool machinery: run_tool (permissions, provenance), merge of registries
-├── architectures/         # The hub: triage + specialists (Support, Account, Catalog), and the remote (A2A) node
+├── conversations.py       # Saved conversations: SQLite checkpointer, thread ids built from the session
+├── architectures/         # The topologies on LangGraph: handoff hub, supervisor, shared base (graph_desk),
+│                          # user confirmations (confirm), and the remote (A2A) node
 └── services/
     ├── a2a_client.py      # A2A client on the SDK (discovery + streaming send + GetTask)
     ├── access_a2a/        # The IAM team's Access agent as an A2A service (server, auth, agent, tools, data)
+    │                      # + approval.py: the manager's approval as a paused workflow (LangGraph interrupt)
+    ├── iam_approvals.py   # The managers' side: list and decide approvals (signed token, no LLM)
     ├── mcp_client.py      # MCP client on the SDK (HTTP): discover, list, call, translate to function calling
     └── mcp_servers/       # The company's systems as MCP servers: server.py (protocol) + one package per system
                            # (tickets, knowledge, account, assets, catalog), each with its tools and its data

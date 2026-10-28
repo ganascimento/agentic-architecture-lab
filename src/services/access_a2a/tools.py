@@ -3,6 +3,7 @@ after human approval. They run INSIDE the service — the Service Desk never see
 
 from src import data  # the company directory (shared infra): who is whose manager
 from src.auth import Session
+from src.services.access_a2a import approval
 from src.services.access_a2a import data as iam
 from src.tools._schema import NO_ARGS, Tool, definition
 
@@ -16,6 +17,7 @@ def create_access_request(session: Session, resource: str, justification: str) -
         "email": session.email, "resource": resource, "justification": justification,
         "approver": approver, "status": "pending_approval",
     }
+    approval.start(request_id)  # module 4: the approval workflow starts — and pauses until the manager decides
     return {"request": request_id, "status": "pending_approval", "approver": approver}
 
 

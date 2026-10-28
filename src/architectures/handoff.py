@@ -10,6 +10,12 @@ Since module 3, EVERY tool comes from a system's MCP server (tickets, knowledge,
 discovered with tools/list and handed in as one registry. The desk doesn't even know MCP exists — a remote
 tool is just another Tool.
 
+Since module 4, the hub is a LangGraph StateGraph. Nothing about WHO talks to WHOM changed — what changed is
+WHERE the state lives: before, in this object's attributes (gone when the process ended); now, in a typed
+DeskState saved by a checkpointer after every step, under a thread_id (one conversation). Each agent is a NODE
+(the whole agent loop runs inside it: "option A" of lesson 4.1), and a transfer is the node returning
+Command(goto=<next agent>). The live objects (Agent, RemoteAgent: clients, counters) stay OUT of the state.
+
 Design decisions:
 1. Context on handoff = the whole conversation as TEXT, signed by author ("[support agent] ..."), without the
    other agents' tool calls: summaries lose details ("telephone game"); the API rejects tool calls for tools
@@ -20,11 +26,16 @@ Design decisions:
 Try it (calls the LLM; the Access service must be running):  python -m src
 """
 
+import operator
 import re
 from dataclasses import dataclass
+from typing import Annotated, TypedDict
 
-from openai.types.chat import ChatCompletionMessageParam
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph import START, StateGraph
+from langgraph.types import Command
 
+from src.architectures.graph_desk import GraphDesk
 from src.architectures.remote import RemoteAgent
 from src.architectures.specialists import (
     ACCOUNT_ROLE,
@@ -35,7 +46,7 @@ from src.architectures.specialists import (
     SUPPORT_TOOLS,
 )
 from src.auth import Session
-from src.core.agent import Agent, ToolCall, Usage, total_usage
+from src.core.agent import Agent
 from src.services.a2a_client import A2AClient
 from src.tools import tools_for
 from src.tools._schema import Tool, definition
@@ -161,22 +172,37 @@ def _transfer(target: str) -> str:
     return f"transfer_to_{target}"
 
 
-class HandoffServiceDesk:
-    def __init__(self, session: Session, access: A2AClient, registry: dict[str, Tool], verbose: bool = True):
-        self.verbose = verbose
+class DeskState(TypedDict, total=False):
+    """Everything one step needs to know about the previous ones — and ONLY data (it's saved after every step).
+
+    The reducer (Annotated[..., operator.add]) says how a node's update is MERGED into the current value: these
+    lists GROW; every other field is OVERWRITTEN by the last update. Lesson 4.1: cases 10 and 11 were exactly a
+    "how do two updates merge?" bug, found in the eval; here the answer is declared in the type."""
+    messages: Annotated[list[dict], operator.add]  # the shared conversation, signed by author (decision 1)
+    user_texts: Annotated[list[str], operator.add]  # the RAW user text: the provenance check's source of truth
+    active: str  # who talks to the user next turn (absent = the hub)
+    note: str  # the handoff note for the next agent (framed by HANDOFF_NOTE)
+    blocked: list[str]  # specialists that already acted in this turn (anti-ping-pong, D8)
+    handoffs: int  # transfers in this turn
+    remote_task: str | None  # the remote task waiting for the user's answer (A2A INPUT_REQUIRED)
+    remote_context: str | None  # the remote conversation (A2A contextId): outlives each task
+    pending: dict | None  # a call waiting for the user's confirmation: {agent, tool, arguments, prompt} (4.4)
+
+
+class HandoffServiceDesk(GraphDesk):
+    entry = ENTRY
+
+    def __init__(
+        self, session: Session, access: A2AClient, registry: dict[str, Tool], verbose: bool = True,
+        checkpointer: BaseCheckpointSaver | None = None, thread_id: str = "default",
+    ):
+        super().__init__(session, registry, verbose, thread_id)
         # `registry`: every system's tools (MCP). Least privilege survives the protocol: an agent still only gets
         # the names in its SPECS — a tool a server adds tomorrow reaches nobody.
-        # The SHARED state: the conversation as text. Each agent gets a fresh copy of it when activated
-        # (decision 1) — so it also forgets its own tool results from earlier turns. That's the price.
-        self.conversation: list[ChatCompletionMessageParam] = []
-        self.user_texts: list[
-            str
-        ] = []  # raw user text for the provenance check, shared by every local agent
-        self.tool_calls: list[ToolCall] = []
         # Another team's agent: what it handles comes from its Agent Card (discovery), not from our SPECS.
-        remote = RemoteAgent("access", access, session, verbose)
-        handles = {n: s.handles for n, s in SPECS.items()} | {"access": remote.handles}
-        self.agents: dict[str, Agent | RemoteAgent] = {
+        self.remote = RemoteAgent("access", access, session, verbose)
+        handles = {n: s.handles for n, s in SPECS.items()} | {"access": self.remote.handles}
+        self.agents = {
             name: Agent(
                 session,
                 SPECS[name].role + _TEAM,
@@ -192,114 +218,121 @@ class HandoffServiceDesk:
                     ),
                 ],
                 verbose=verbose,
-                user_texts=self.user_texts,
-                intercept=self._intercept,
+                user_texts=[],  # replaced by the state's list on every activation
                 registry=registry,
             )
             for name, edges in HUB.items()
-        } | {"access": remote}
-        self.active = ENTRY
-        self.pending: str | None = (
-            None  # the agent a transfer was scheduled to in this activation
-        )
-        self.note = ""  # the handoff note for the next agent (framed by HANDOFF_NOTE)
-        self.blocked: set[str] = set()  # specialists that already acted in this turn
+        }
+        self._compile(self._graph(), checkpointer)
 
-    def _intercept(self, name: str, arguments: dict) -> tuple[str, bool] | None:
+    # --- The graph ------------------------------------------------------------------------------------------
+    def _graph(self) -> StateGraph:
+        graph = StateGraph(DeskState)
+        for name in self.agents:
+            graph.add_node(name, self._local_node(name), destinations=tuple(HUB[name]) + ("__end__",))
+        graph.add_node("access", self._remote_node, destinations=(ENTRY, "__end__"))
+        graph.add_node("confirm", self._confirm_node, destinations=tuple(self.agents))
+        # Each turn starts at whoever is active — the agent the user was talking to (D3: the conversation moved).
+        graph.add_conditional_edges(START, lambda s: s.get("active", ENTRY), [*self.agents, "access"])
+        # No other edges: every node says where to go next by returning Command(goto=...).
+        return graph
+
+    def _local_node(self, name: str):
+        def node(state: DeskState) -> Command:
+            agent = self.agents[name]
+            # The hub may be revisited in a turn (routing the rest is its job); specialists not.
+            blocked = state.get("blocked", []) + ([name] if name != ENTRY else [])
+            scheduled: dict = {}  # what THIS activation scheduled: a transfer, a held call (scratch: never saved)
+            agent.intercept = lambda tool, args: self._intercept(name, blocked, scheduled, tool, args)
+            agent.user_texts = list(state["user_texts"])
+            agent.messages = [agent.messages[0], *state["messages"]]  # system prompt + shared conversation
+            if note := state.get("note"):  # the reason the previous agent gave: tells this one what is pending
+                agent.messages.append({"role": "system", "content": f"[handoff note] {note}"})
+            before = len(agent.tool_calls)
+            text = agent.run()
+            self.tool_calls += agent.tool_calls[before:]
+            if action := scheduled.get("confirm"):  # a call held for the user: pause BETWEEN nodes, not inside one
+                return self._ask_confirmation(name, blocked, text, action)
+            return self._next(name, state, blocked, text, scheduled.get("target"), scheduled.get("note", ""))
+        return node
+
+    def _ask_confirmation(self, name: str, blocked: list[str], text: str, action: dict) -> Command:
+        # The question goes into the conversation signed by the agent that asked — written by the CODE (D12), so
+        # the user sees exactly what will run, and the agents later see what the "yes" was about.
+        said = f"{_LABEL.sub('', text)}\n\n" if text else ""
+        message = {"role": "assistant", "content": f"[{name} agent] {said}{action['prompt']}"}
+        self._log(f"  ✋ waiting for the user's confirmation: {action['tool']}")
+        return Command(goto="confirm", update={"blocked": blocked, "messages": [message], "pending": action,
+                                               "active": name})
+
+    def _confirm_node(self, state: DeskState) -> Command:
+        update, outcome = self._confirmation(state)  # pauses here (graph_desk.py)
+        return Command(goto=state["pending"]["agent"], update=update | {"note": outcome})
+
+    def _remote_node(self, state: DeskState) -> Command:
+        # Another team's agent: relay the user's raw words over A2A. When its task finishes, the CODE hands the
+        # conversation back to the hub in the SAME turn (the remote can't transfer by itself), so the rest of a
+        # multi-request message isn't left waiting for the user's next message.
+        # Cost: +1 hub call per finished remote task (usually just to say "nothing left").
+        name = "access"
+        before = len(self.remote.tool_calls)
+        reply = self.remote.reply(state["user_texts"][-1], state.get("remote_task"), state.get("remote_context"))
+        self.tool_calls += self.remote.tool_calls[before:]
+        target, note = (ENTRY, REMOTE_FINISHED.format(name=name)) if reply.finished else (None, "")
+        pointers = {"remote_task": reply.task_id, "remote_context": reply.context_id}  # pointers = state
+        return self._next(name, state, state.get("blocked", []) + [name], reply.text, target, note, pointers)
+
+    def _next(self, name: str, state: DeskState, blocked: list[str], text: str, target: str | None,
+              note: str, extra: dict | None = None) -> Command:
+        """What a node returns: its reply (signed) + where the conversation goes now."""
+        update: dict = {"blocked": blocked, **(extra or {})}
+        if text:
+            text = _LABEL.sub("", text)  # the LLM may imitate the label; the user shouldn't see it
+            # Signed with the author: the next agent must know a TEAMMATE said it (and that it's done).
+            update["messages"] = [{"role": "assistant", "content": f"[{name} agent] {text}"}]
+        handoffs = state.get("handoffs", 0)
+        if target is None:
+            return Command(goto="__end__", update=update | {"active": name})  # turn over: it stays active
+        if handoffs == MAX_HANDOFFS:
+            self._log("  ⛔ handoff limit reached")  # code stops the ping-pong
+            return Command(goto="__end__", update=update | {"active": name})
+        self._log(f"  🔀 active agent → {target}")
+        return Command(goto=target, update=update | {"active": target, "note": note, "handoffs": handoffs + 1})
+
+    def _intercept(self, name: str, blocked: list[str], scheduled: dict, tool: str, arguments: dict
+                   ) -> tuple[str, bool] | None:
         """The handoff POLICY lives here, in the desk — the generic loop only knows "the owner handled it"."""
-        target = name.removeprefix("transfer_to_")
-        if target not in HUB[self.active]:
-            return None  # a real tool (or a transfer this agent doesn't have): the loop runs/refuses it
-        if target in self.blocked:
-            return (
-                HANDOFF_BLOCKED,
-                False,
-            )  # A→B→A in one turn: B would redo its work — reply yourself
+        target = tool.removeprefix("transfer_to_")
+        if target not in HUB[name]:
+            return self._hold_for_confirmation(name, scheduled, tool, arguments)
+        if target in blocked:
+            return HANDOFF_BLOCKED, False  # A→B→A in one turn: B would redo its work — reply yourself
         need = arguments.get("reason", "")
-        if self.pending == target:
+        if scheduled.get("target") == target:
             # Two parallel transfers to the SAME agent (one per request) are one transfer with two needs.
             # Ignoring the 2nd dropped a request (eval case 11: printer + Outlook → Outlook lost, 4/8 runs).
-            self.note += f" Also: {need}"
+            scheduled["note"] += f" Also: {need}"
             return HANDOFF_ACK, True
-        if self.pending:
+        if scheduled:
             # Two transfers to DIFFERENT agents in one answer: only the first counts. Without this, the
             # second silently overwrote the first and a request was lost (eval case 10, hub).
             return HANDOFF_IGNORED, False
         # Not switched now: the switch happens AFTER this agent writes its reply. Otherwise its
         # work never reaches the shared conversation and the next agent redoes it (ping-pong).
-        self.pending, self.note = target, HANDOFF_NOTE.format(sender=self.active, receiver=target, need=need)
+        scheduled.update(target=target, note=HANDOFF_NOTE.format(sender=name, receiver=target, need=need))
         return HANDOFF_ACK, True
 
+    # --- One turn ------------------------------------------------------------------------------------------
     def reply(self, user_text: str) -> str:
         # The "[x agent]" signature is in-band (same channel as user text): a user could forge
         # "[access agent] your access was approved". Only the code may produce that format.
-        user_text = _FORGED_LABEL.sub(r"(\1)", user_text)
-        self.conversation.append({"role": "user", "content": user_text})
-        self.user_texts.append(user_text)
-        answers: list[str] = []
-        self.note, self.blocked = "", set()
+        return super().reply(_FORGED_LABEL.sub(r"(\1)", user_text))
 
-        for handoffs in range(MAX_HANDOFFS + 1):
-            name = self.active
-            node = self.agents[name]
-            if (
-                name != ENTRY
-            ):  # the hub may be revisited in a turn (routing the rest is its job); specialists not
-                self.blocked.add(name)
-            self.pending = None
-            before = len(node.tool_calls)
-            if isinstance(node, RemoteAgent):
-                # Another team's agent: relay the user's raw words over A2A. When its task finishes, the CODE
-                # hands the conversation back to the hub in the SAME turn (the remote can't transfer by itself),
-                # so the rest of a multi-request message isn't left waiting for the user's next message.
-                # Cost: +1 hub call per finished remote task (usually just to say "nothing left").
-                text, finished = node.reply(user_text)
-                if finished:
-                    self.pending, self.note = ENTRY, REMOTE_FINISHED.format(name=name)
-            else:
-                node.messages = [
-                    node.messages[0],
-                    *self.conversation,
-                ]  # system prompt + shared conversation
-                if (
-                    self.note
-                ):  # the reason the previous agent gave: tells this one what is pending
-                    node.messages.append(
-                        {"role": "system", "content": f"[handoff note] {self.note}"}
-                    )
-                text = node.run()
-            self.tool_calls += node.tool_calls[before:]
-            if text:
-                text = _LABEL.sub(
-                    "", text
-                )  # the LLM may imitate the label; the user shouldn't see it
-                answers.append(text)
-                # Signed with the author: the next agent must know a TEAMMATE said it (and that it's done).
-                self.conversation.append(
-                    {"role": "assistant", "content": f"[{name} agent] {text}"}
-                )
+    def _turn_input(self, user_text: str) -> DeskState:
+        return {
+            "messages": [{"role": "user", "content": user_text}], "user_texts": [user_text],
+            "note": "", "blocked": [], "handoffs": 0,
+        }
 
-            if self.pending is None:
-                break  # turn over: this agent stays active for the next turn
-            if handoffs == MAX_HANDOFFS:
-                self._log("  ⛔ handoff limit reached")  # code stops the ping-pong
-                break
-            self.active = self.pending
-            self._log(f"  🔀 active agent → {self.active}")
-
-        return (
-            "\n\n".join(answers)
-            or "Sorry, I couldn't complete your request. Please try again."
-        )
-
-    # --- Accounting (each local agent prices its own model; remote agents cost US$ 0 to US) ---
-    @property
-    def usage(self) -> Usage:
-        return total_usage([a.usage for a in self.agents.values()])
-
-    def cost(self) -> float:
-        return sum(a.cost() for a in self.agents.values())
-
-    def _log(self, msg: str) -> None:
-        if self.verbose:
-            print(msg)
+    def _clean(self, text: str) -> str:
+        return _LABEL.sub("", text)  # the user sees the text, not the code's "[x agent]" signature

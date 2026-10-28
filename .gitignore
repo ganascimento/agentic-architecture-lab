@@ -6,3 +6,5 @@ __pycache__/
 # Eval outputs: generated on every run (key numbers go to CLAUDE.md / notes/SUMMARY.md)
 evals/results/
 .keys/
+# Conversation checkpoints (module 4): they hold users' conversations
+.state/

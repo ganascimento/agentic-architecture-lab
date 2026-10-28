@@ -7,6 +7,7 @@ they run in OUR process: nobody outside a server can reset it — on purpose). P
 Usage (venv active):
     python -m evals.run                         # all cases, 3 runs each
     python -m evals.run --runs 1 --case 10 11
+    python -m evals.run --topology supervisor   # lesson 4.5: the same cases on the supervisor topology
 """
 
 import argparse
@@ -34,17 +35,25 @@ RESULTS_DIR = Path(__file__).parent / "results"
 
 
 def run_case(
-    case: Case, access: AccessExecutor, client: A2AClient, tools: dict[str, Tool]
+    case: Case, access: AccessExecutor, client: A2AClient, tools: dict[str, Tool], topology: str = "hub"
 ) -> RunResult:
     mcp_servers.reset()  # every run starts from the same data — the company's systems'...
     iam_data.reset()  # ...and the IAM team's
     desk = service_desk(
-        session_for(case.user), tools, False, client
+        session_for(case.user), tools, False, client, topology=topology
     )  # the case's user is already logged in
     # The remote agent's LLM bill is the IAM team's; we add it to ours to compare with module 1 (all in-process).
     remote_calls, remote_cost = access.usage.calls, access.cost()
     start = time.perf_counter()
-    replies = [desk.reply(turn) for turn in case.turns]
+    replies = []
+    for turn in case.turns:
+        replies.append(desk.reply(turn))
+        # Module 4: the desk may pause for the user's confirmation. The simulated user answers it (at most twice
+        # per turn: a desk that keeps asking is a failure the checks will show, not an endless loop).
+        for _ in range(2):
+            if not desk.awaiting_confirmation:
+                break
+            replies.append(desk.reply(case.confirm))
     return RunResult(
         replies=replies,
         tool_calls=desk.tool_calls,
@@ -59,13 +68,14 @@ def run_case_with_retry(
     access: AccessExecutor,
     client: A2AClient,
     tools: dict[str, Tool],
+    topology: str = "hub",
     attempts: int = 3,
 ) -> RunResult:
     """A network blip or a 5xx/429 from the API says nothing about the agent: retry the whole run (from clean
     data) instead of crashing the eval. Any other exception still crashes on purpose — that's a bug."""
     for attempt in range(1, attempts + 1):
         try:
-            return run_case(case, access, client, tools)
+            return run_case(case, access, client, tools, topology)
         except (
             openai.APIConnectionError,
             openai.APITimeoutError,
@@ -90,6 +100,7 @@ def main() -> None:
         help="runs per case (the LLM varies between runs)",
     )
     parser.add_argument("--case", type=int, nargs="*", help="only these case ids")
+    parser.add_argument("--topology", choices=("hub", "supervisor"), default="hub")
     args = parser.parse_args()
 
     cases = [c for c in CASES if not args.case or c.id in args.case]
@@ -103,7 +114,7 @@ def main() -> None:
     _, mcp_url = mcp_servers.start()
     tools = mcp_client.connect(mcp_urls(mcp_url))  # also once
     print(
-        f"Service Desk (hub + Access via A2A at {url} + 5 systems via MCP/HTTP at {mcp_url}) | "
+        f"Service Desk ({args.topology} + Access via A2A at {url} + 5 systems via MCP/HTTP at {mcp_url}) | "
         f"{len(cases)} cases x {args.runs} runs\n"
     )
     print(
@@ -112,7 +123,7 @@ def main() -> None:
 
     for case in cases:
         runs = [
-            run_case_with_retry(case, access, client, tools) for _ in range(args.runs)
+            run_case_with_retry(case, access, client, tools, args.topology) for _ in range(args.runs)
         ]
         failures = [[msg for check in case.checks if (msg := check(r))] for r in runs]
         passed = sum(1 for f in failures if not f)
@@ -125,6 +136,8 @@ def main() -> None:
             "avg_calls": fmean(r.calls for r in runs),
             "avg_cost": fmean(r.cost for r in runs),
             "avg_latency": fmean(r.latency for r in runs),
+            # Module 4: how often the desk asked the user to confirm (each one = an extra turn for the user).
+            "avg_confirmations": fmean(len(r.replies) - len(case.turns) for r in runs),
             "failures": [f for f in failures if f],
             "replies": [r.replies[-1] for r in runs],  # final reply of each run
             "tools": [[t.name for t in r.tool_calls] for r in runs],
@@ -143,21 +156,23 @@ def main() -> None:
     total_runs = sum(r["runs"] for r in rows)
     total_pass = sum(r["passed"] for r in rows)
     summary = {
-        "arch": "hub-a2a-mcp",
+        "arch": f"{args.topology}-a2a-mcp",
         "pass_rate": total_pass / total_runs if total_runs else 0.0,
         "avg_calls": fmean(r["avg_calls"] for r in rows),
         "avg_cost": fmean(r["avg_cost"] for r in rows),
         "avg_latency": fmean(r["avg_latency"] for r in rows),
+        "confirmations": sum(r["avg_confirmations"] * r["runs"] for r in rows),
         "total_cost": sum(r["avg_cost"] * r["runs"] for r in rows),
     }
     print(
         f"\nPass rate: {summary['pass_rate']:.0%} ({total_pass}/{total_runs})"
         f" | avg per case: {summary['avg_calls']:.1f} calls, US$ {summary['avg_cost']:.5f},"
-        f" {summary['avg_latency']:.1f}s | eval total: US$ {summary['total_cost']:.4f}"
+        f" {summary['avg_latency']:.1f}s | confirmations asked: {summary['confirmations']:.0f}"
+        f" | eval total: US$ {summary['total_cost']:.4f}"
     )
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    out = RESULTS_DIR / f"hub-a2a-mcp-{datetime.now():%Y%m%d-%H%M%S}.json"
+    out = RESULTS_DIR / f"{args.topology}-a2a-mcp-{datetime.now():%Y%m%d-%H%M%S}.json"
     out.write_text(
         json.dumps({"summary": summary, "cases": rows}, ensure_ascii=False, indent=2)
     )

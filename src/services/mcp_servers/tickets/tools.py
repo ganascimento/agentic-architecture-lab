@@ -68,7 +68,8 @@ def _duplicate_of(session: Session, text: str) -> str | None:
 def open_ticket(session: Session, title: str, description: str, category: str, priority: str,
                 force_new: bool = False) -> dict:
     # A flag the LLM sets is a WEAK confirmation: the model can set it by itself ("every available tool tends
-    # to be used"). MCP has a stronger alternative — the server asks the USER directly (elicitation). Module 4.
+    # to be used"). Since module 4 OUR host asks the user before sending force_new=true (architectures/confirm.py).
+    # This server can't know that: for ANY host, it would have to ask the user itself (MCP elicitation).
     duplicate = None if force_new else _duplicate_of(session, f"{title} {description}")
     if duplicate:
         existing = itsm.TICKETS[duplicate]
@@ -136,7 +137,8 @@ def close_ticket(session: Session, ticket_id: str, resolution: str) -> dict:
     # `resolution` must be the user's own words (from_user below), so an instruction hidden in a ticket comment
     # can't produce it. ⚠️ Since module 3 the check runs in the HOST, not here: this server never sees the
     # conversation, so it can only DECLARE the rule (../server.py) and trust the client to enforce it. A client
-    # that ignores the declaration closes tickets on anything. Module 4 moves it back here (elicitation).
+    # that ignores the declaration closes tickets on anything. Protecting itself from ANY host would take MCP
+    # elicitation (the server asks the user directly); our host's confirmation (module 4) covers only our host.
     t = _own_ticket(session, ticket_id)
     if t["status"] == "closed":
         raise ValueError(f"Ticket {ticket_id.upper()} is already closed.")

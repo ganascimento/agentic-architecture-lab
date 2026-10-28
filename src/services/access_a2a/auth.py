@@ -2,7 +2,8 @@
 
 A Starlette AuthenticationBackend runs on every HTTP request, before the SDK's JSON-RPC handler:
 - the Agent Card stays public (discovery needs no credentials — it has no secrets);
-- /a2a requires a bearer token SIGNED by a caller we trust, addressed to US, not expired, for a known user.
+- /a2a requires a bearer token SIGNED by a caller we trust, addressed to US, not expired, for a known user;
+- so does /approvals (module 4): the approver's decisions, on behalf of the logged-in manager.
 Anything else → HTTP 401, and our business code never runs. The SDK then takes the verified user from
 request.user (its default context builder) and scopes the task store by it.
 
@@ -37,16 +38,17 @@ REQUIRED_CLAIMS = ["iss", "sub", "aud", "iat", "exp"]
 
 
 class DelegatedTokenBackend(AuthenticationBackend):
-    def __init__(self, audience: str, protected_path: str):
+    def __init__(self, audience: str, protected_paths: tuple[str, ...]):
         self.audience = (
             audience  # our own RPC URL: a token for any other service is not for us
         )
-        self.protected_path = protected_path
+        self.protected_paths = protected_paths  # each path and everything under it
 
     async def authenticate(
         self, conn: HTTPConnection
     ) -> tuple[AuthCredentials, SimpleUser] | None:
-        if conn.url.path != self.protected_path:
+        path = conn.url.path
+        if not any(path == p or path.startswith(f"{p}/") for p in self.protected_paths):
             return None  # public route (the Agent Card)
         scheme, _, token = conn.headers.get("authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not token:

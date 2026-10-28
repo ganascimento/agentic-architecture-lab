@@ -31,6 +31,10 @@ PRICES = {
     "gpt-6-luna": (0.10, 0.50),
 }
 
+# Which topology runs the Service Desk (lesson 4.5): "hub" (handoff: the conversation moves to the specialist) or
+# "supervisor" (one agent talks to the user; the specialists are its tools). Same agents, same tools.
+TOPOLOGY = os.getenv("DESK_TOPOLOGY", "hub")
+
 # Where the IAM team's Access agent lives (module 2). Only the base URL: the rest comes from its Agent Card.
 ACCESS_AGENT_URL = os.getenv("ACCESS_AGENT_URL", "http://localhost:8001")
 

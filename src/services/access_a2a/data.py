@@ -9,9 +9,12 @@ _SEED = {
 }
 
 ACCESS_REQUESTS: dict[str, dict] = {}
+# What the code GRANTED after a manager's approval (module 4: approval.py). Stands in for AD groups, SAP roles...
+ACCESS_GRANTS: list[dict] = []
 
 
 def reset() -> None:
+    ACCESS_GRANTS.clear()
     ACCESS_REQUESTS.clear()
     ACCESS_REQUESTS.update({k: dict(v) for k, v in _SEED.items()})
 

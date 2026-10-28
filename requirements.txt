@@ -7,3 +7,7 @@ uvicorn==0.40.0
 pyjwt[crypto]==2.15.0  # 2.5: signed identity between services (Ed25519)
 # Module 3 (MCP). PINNED, like a2a-sdk: 2.x broke 1.x (FastMCP → MCPServer), and 2.x speaks the 2026-07-28 spec.
 mcp==2.2.0
+# Module 4 (LangGraph). PINNED: the API still moves in details (streaming modes, interrupt payloads).
+# Pulls langchain-core as a dependency — we don't USE LangChain (models, tools, messages stay ours).
+langgraph==1.2.18
+langgraph-checkpoint-sqlite==3.1.2  # 4.3: the conversation's state on disk (survives a restart)

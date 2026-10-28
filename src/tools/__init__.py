@@ -68,8 +68,8 @@ def run_tool(
         return f"Unknown tool: {name}", True
     for arg in tool.from_user:
         # The other arguments ARE the request (e.g. the resource): their words don't prove anything.
-        request_text = " ".join(str(v) for k, v in arguments.items() if k != arg)
-        problem = provenance.check(arg, str(arguments.get(arg, "")), user_texts or [], request_text)
+        request = provenance.request_text(arguments, arg)
+        problem = provenance.check(arg, str(arguments.get(arg, "")), user_texts or [], request)
         if problem:
             return f"Error: {problem}", True
     try:

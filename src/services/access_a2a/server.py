@@ -43,14 +43,19 @@ from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from src.auth import Session, session_for
 from src.core.agent import Agent, Usage, total_usage
+from src.services.access_a2a import approval
 from src.services.access_a2a.agent import ASK_USER, access_agent_for
 from src.services.access_a2a.auth import DelegatedTokenBackend, unauthorized
 
 PORT = 8001
 RPC_PATH = "/a2a"
+APPROVALS_PATH = "/approvals"  # module 4: the managers' decisions — plain HTTP, no agent, no LLM
 AUTH_SCHEME = "delegatedToken"
 
 
@@ -180,6 +185,29 @@ def _business_result(calls: list) -> dict:
     return result
 
 
+# --- Approvals (module 4): NOT an A2A skill — a human decision has no business going through an LLM ----------
+async def list_approvals(request: Request) -> JSONResponse:
+    # request.user = the token's `sub`, already verified by auth.py: the approver's queue, nobody else's.
+    return JSONResponse(approval.pending_for(request.user.username))
+
+
+async def decide_approval(request: Request) -> JSONResponse:
+    body = await request.json()
+    if not isinstance(body.get("approve"), bool):
+        return JSONResponse({"error": "body must be {\"approve\": true|false}"}, status_code=400)
+    try:
+        result = await asyncio.to_thread(
+            approval.decide, request.path_params["request_id"], request.user.username, body["approve"]
+        )
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except PermissionError as e:  # authenticated, but not THE approver of this request
+        return JSONResponse({"error": str(e)}, status_code=403)
+    except ValueError as e:  # already decided
+        return JSONResponse({"error": str(e)}, status_code=409)
+    return JSONResponse(result)
+
+
 # --- Serving: the SDK builds the routes, Starlette + uvicorn serve them -----------------------------------
 def make_app(service: AccessExecutor, port: int) -> Starlette:
     card = agent_card(port)
@@ -189,10 +217,13 @@ def make_app(service: AccessExecutor, port: int) -> Starlette:
     routes = [
         *create_agent_card_routes(agent_card=card),  # GET /.well-known/agent-card.json (public)
         *create_jsonrpc_routes(handler, RPC_PATH),  # POST /a2a (token required)
+        Route(APPROVALS_PATH, list_approvals, methods=["GET"]),  # token required (the approver)
+        Route(f"{APPROVALS_PATH}/{{request_id}}", decide_approval, methods=["POST"]),
     ]
     # Runs before every route: no valid token → 401, and neither the SDK nor our executor ever sees the request.
     # The SDK's default context builder then takes the verified user from request.user.
-    backend = DelegatedTokenBackend(audience=card.supported_interfaces[0].url, protected_path=RPC_PATH)
+    backend = DelegatedTokenBackend(audience=card.supported_interfaces[0].url,
+                                    protected_paths=(RPC_PATH, APPROVALS_PATH))
     auth = Middleware(AuthenticationMiddleware, backend=backend, on_error=unauthorized)
     return Starlette(routes=routes, middleware=[auth])
 

@@ -105,15 +105,14 @@ def test_a_justification_that_only_names_the_item_is_refused_over_mcp(systems):
     assert is_error is True and "only restates the request" in result
 
 
-@pytest.mark.xfail(strict=True, reason="Known gap since module 3 (eval case 42, 1 of 3 runs): the HOST runs the "
-                   "words check but no longer knows that SW004 is 'Adobe Acrobat Pro' (that was a host-side callback, "
-                   "which doesn't cross the protocol), so the item's name counts as the user's words. Fix: the server "
-                   "asks the user directly (elicitation, module 4).")
-def test_item_name_plus_invented_words_is_refused_over_mcp(systems):
-    result, is_error = run_tool("request_catalog_approval",
-                                {"item_id": "SW004", "justification": "Solicita Adobe Acrobat Pro (instalação de software novo)."},
-                                ANA, user_texts=["quero o Adobe Acrobat Pro"], registry=systems)
-    assert is_error is True
+def test_item_name_plus_invented_words_still_pass_run_tool_alone(systems):
+    # Module 3's gap (eval case 42): the host no longer knows SW004 is "Adobe Acrobat Pro", so the item's name counts
+    # as the user's words and this passes at exactly 50%. run_tool alone STILL accepts it — on purpose: since module 4
+    # the desk holds it and asks the user first (tests/test_confirmation.py). The fix is a layer, not this function.
+    _, is_error = run_tool("request_catalog_approval",
+                           {"item_id": "SW004", "justification": "Solicita Adobe Acrobat Pro (instalação de software novo)."},
+                           ANA, user_texts=["quero o Adobe Acrobat Pro"], registry=systems)
+    assert is_error is False
 
 
 # --- System failures go to OUR code, not to the LLM (finding f) ------------------------------------------------
